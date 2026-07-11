@@ -9,6 +9,7 @@ import {
   PINLayer,
   User,
   SafeZone,
+  GuardEvent,
 } from '@/constants/types';
 
 interface PhantomStore extends PhantomState {
@@ -30,7 +31,11 @@ interface PhantomStore extends PhantomState {
   // Config
   setLocationEnabled: (v: boolean) => void;
   setIntruderSnapshotEnabled: (v: boolean) => void;
-  setGuardBackgroundMode: (v: boolean) => void;
+
+  // Guard Mode event log
+  addGuardEvent: (e: GuardEvent) => void;
+  clearGuardEvents: () => void;
+  setGuardArmed: (v: boolean) => void;
   addSafeZone: (z: SafeZone) => void;
   removeSafeZone: (id: string) => void;
   updateSafeZone: (id: string, patch: Partial<SafeZone>) => void;
@@ -57,7 +62,8 @@ export const usePhantomStore = create<PhantomStore>()(
       locationEnabled: false,
       intruderSnapshotEnabled: true,
       autoWipeAfterAttempts: 10,
-      guardBackgroundMode: false, // default to stealth — no notification
+      guardEvents: [],
+      guardArmed: false, // transient — never persisted (see partialize)
 
       devices: [],
 
@@ -96,7 +102,11 @@ export const usePhantomStore = create<PhantomStore>()(
 
       setLocationEnabled:         (v) => set({ locationEnabled: v }),
       setIntruderSnapshotEnabled: (v) => set({ intruderSnapshotEnabled: v }),
-      setGuardBackgroundMode:     (v) => set({ guardBackgroundMode: v }),
+
+      addGuardEvent: (e) =>
+        set((s) => ({ guardEvents: [e, ...s.guardEvents].slice(0, 500) })),
+      clearGuardEvents: () => set({ guardEvents: [] }),
+      setGuardArmed: (v) => set({ guardArmed: v }),
 
       addSafeZone: (z) =>
         set((s) => ({ safeZones: [...s.safeZones, z] })),
@@ -119,8 +129,10 @@ export const usePhantomStore = create<PhantomStore>()(
       },
       // isAppUnlocked and unlockedLayers are NEVER persisted —
       // every cold start requires biometric re-auth and fresh PIN entry.
+      // guardArmed is transient too — a killed-while-armed session must not
+      // resume as "armed" on next launch.
       partialize: (state) => {
-        const { isAppUnlocked, unlockedLayers, ...rest } = state;
+        const { isAppUnlocked, unlockedLayers, guardArmed, ...rest } = state;
         return rest;
       },
     },

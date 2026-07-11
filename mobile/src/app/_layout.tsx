@@ -56,6 +56,9 @@ export default function RootLayout() {
           // Pick up any remote lock/wipe/alert commands issued while backgrounded.
           void pollAndApplyCommands();
         }
+        // Guard Mode owns the foreground while armed — don't yank the user to
+        // the biometric gate (that would abandon an active watch session).
+        if (usePhantomStore.getState().guardArmed) return;
         if (isAuthenticated && !isAppUnlocked && !gateQueued.current) {
           gateQueued.current = true;
           setTimeout(() => {

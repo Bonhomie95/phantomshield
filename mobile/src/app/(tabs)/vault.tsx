@@ -92,11 +92,15 @@ export default function VaultScreen() {
   };
 
   const triggerLabel: Record<IntruderPhoto['trigger'], string> = {
-    wrong_pin:          'Wrong PIN entered',
-    failed_biometric:   'Failed biometric',
-    unauthorized_open:  'Unauthorized open attempt',
-    motion:             'Phone moved (Guard Mode)',
-    charger_unplugged:  'Charger unplugged (Guard Mode)',
+    wrong_pin:            'Wrong PIN entered',
+    failed_biometric:     'Failed biometric',
+    unauthorized_open:    'Unauthorized open attempt',
+    motion:               'Phone moved (Guard Mode)',
+    charger_unplugged:    'Charger unplugged (Guard Mode)',
+    charger_connected:    'Charger plugged in (Guard Mode)',
+    charger_disconnected: 'Charger unplugged (Guard Mode)',
+    app_switch:           'Another app opened (Guard Mode)',
+    disarm_attempt:       'Stop attempt (Guard Mode)',
   };
 
   const totalScreenTimeSec = recentActivity.reduce((s, e) => s + e.durationSec, 0);

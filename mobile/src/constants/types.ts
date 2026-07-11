@@ -28,7 +28,11 @@ export type IntruderTrigger =
   | 'failed_biometric'
   | 'unauthorized_open'
   | 'motion'
-  | 'charger_unplugged';
+  | 'charger_unplugged'
+  | 'charger_connected'
+  | 'charger_disconnected'
+  | 'app_switch'
+  | 'disarm_attempt';
 
 export interface IntruderPhoto {
   id: string;
@@ -37,6 +41,33 @@ export interface IntruderPhoto {
   trigger: IntruderTrigger;
   isAnomaly: boolean;       // always true — every intruder photo IS an anomaly
   anomalyReason?: string;
+  latitude?: number;
+  longitude?: number;
+}
+
+// ─── Guard Mode ───────────────────────────────────────────────────────────────
+
+export type GuardLevel = 'low' | 'medium' | 'high';
+
+export type GuardEventType =
+  | 'motion'                // phone was moved
+  | 'charger_connected'     // charger plugged in
+  | 'charger_disconnected'  // charger unplugged
+  | 'app_switch'            // someone left the app / opened another app
+  | 'disarm_attempt'        // someone tried to stop Guard Mode
+  | 'wrong_pin';            // wrong PIN entered while trying to stop
+
+/**
+ * One silently-recorded Guard Mode event. Captured without any on-screen
+ * reaction and only revealed to the owner when Guard Mode is stopped.
+ */
+export interface GuardEvent {
+  id: string;
+  type: GuardEventType;
+  timestamp: string;
+  reason: string;
+  /** Front-camera face snap, when one could be taken (app in foreground). */
+  imageUri?: string;
   latitude?: number;
   longitude?: number;
 }
@@ -88,8 +119,10 @@ export interface PhantomState {
   intruderSnapshotEnabled: boolean;
   autoWipeAfterAttempts: number | null;
   devices: DeviceInfo[];
-  // Guard Mode: false = stealth (no notification, screen stays on, foreground only);
-  // true = background (keeps running when backgrounded, but shows the OS-mandated
-  // persistent notification — Android requires one for a foreground service).
-  guardBackgroundMode: boolean;
+  // Silently-recorded Guard Mode events, persisted on-device and only surfaced
+  // to the owner when Guard Mode is stopped with the correct PIN.
+  guardEvents: GuardEvent[];
+  // Transient (never persisted): true while Guard Mode is armed, so the root
+  // layout doesn't force a biometric re-gate when the app returns to foreground.
+  guardArmed: boolean;
 }
