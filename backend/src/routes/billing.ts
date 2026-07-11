@@ -3,6 +3,7 @@ import { User } from '@/models';
 import { authenticate } from '@/middleware/auth';
 import { JWTPayload, PLAN_LIMITS } from '@/types';
 import { planFromEntitlements } from '@/lib/plans';
+import { getRedis } from '@/config/redis';
 
 const ACTIVE_EVENTS = new Set([
   'INITIAL_PURCHASE', 'RENEWAL', 'PRODUCT_CHANGE', 'UNCANCELLATION', 'NON_RENEWING_PURCHASE',
@@ -24,6 +25,13 @@ const billingRoutes: FastifyPluginAsync = async (fastify) => {
     const event = (request.body as any)?.event;
     if (!event?.app_user_id || !event?.type) {
       return reply.code(400).send({ error: 'Malformed event.' });
+    }
+
+    // Idempotency: RevenueCat can retry/replay deliveries. Ignore an event id
+    // we've already applied so a replay can't re-toggle a plan.
+    if (event.id) {
+      const fresh = await getRedis().set(`rc:evt:${event.id}`, '1', 'EX', 172800, 'NX');
+      if (fresh === null) return reply.code(200).send({ ok: true, duplicate: true });
     }
 
     const user = await User.findById(event.app_user_id).catch(() => null);

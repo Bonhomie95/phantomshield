@@ -10,6 +10,7 @@ import multipart from '@fastify/multipart';
 import { connectDB } from './config/db';
 import { connectRedis, getRedis } from './config/redis';
 import { startPushWorker } from './services/pushService';
+import { initWsPubSub } from './services/wsService';
 
 // Routes
 import authRoutes    from './routes/auth';
@@ -112,13 +113,31 @@ const buildServer = async () => {
   fastify.register(referralRoutes,  { prefix: '/api' }); // /api/referrals/me, /api/referrals/redeem
   fastify.register(wsRoutes);       // handles /ws WebSocket endpoint
 
-  // ── Health check ──────────────────────────────────────────────────
+  // ── Liveness — is the process up ──────────────────────────────────
   fastify.get('/health', async () => ({
     status: 'ok',
     version: process.env.npm_package_version ?? '1.0.0',
     env: process.env.NODE_ENV,
     timestamp: new Date().toISOString(),
   }));
+
+  // ── Readiness — can we actually serve traffic (DB + Redis) ─────────
+  fastify.get('/ready', async (_req, reply) => {
+    const mongoose = await import('mongoose');
+    const dbUp = mongoose.default.connection.readyState === 1;
+    let redisUp = false;
+    try {
+      redisUp = (await getRedis().ping()) === 'PONG';
+    } catch {
+      redisUp = false;
+    }
+    const ready = dbUp && redisUp;
+    return reply.code(ready ? 200 : 503).send({
+      status: ready ? 'ready' : 'not_ready',
+      db: dbUp ? 'up' : 'down',
+      redis: redisUp ? 'up' : 'down',
+    });
+  });
 
   // ── 404 handler ───────────────────────────────────────────────────
   fastify.setNotFoundHandler((req, reply) => {
@@ -148,8 +167,9 @@ const start = async () => {
 
     const server = await buildServer();
 
-    // Start BullMQ push worker
+    // Start BullMQ push worker + cross-instance WS pub/sub
     startPushWorker();
+    initWsPubSub();
 
     await server.listen({ port: PORT, host: '0.0.0.0' });
     console.log(`\n🛡  PhantomShield API running on port ${PORT}\n`);

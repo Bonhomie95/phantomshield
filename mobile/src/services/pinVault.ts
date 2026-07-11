@@ -71,3 +71,47 @@ export async function clearPin(layer: PINLayer): Promise<void> {
 export async function clearAllPins(): Promise<void> {
   await Promise.all(ALL_LAYERS.map((l) => SecureStore.deleteItemAsync(keyFor(l))));
 }
+
+// ─── Brute-force lockout (persisted) ──────────────────────────────────────────
+// The lockout lives in the keychain, not component state, so force-quitting and
+// relaunching the app can't reset the attempt counter and bypass the wait.
+
+const LOCK_KEY = 'ps_pin_lock';
+
+export interface LockState {
+  attempts: number;
+  /** epoch ms until which entry is blocked; 0 = not locked. */
+  lockedUntil: number;
+}
+
+/** Escalating lockout: 3 fails → 5s, 7 → 30s, 10+ → 60s. */
+function lockoutMsFor(attempts: number): number {
+  if (attempts >= 10) return 60_000;
+  if (attempts >= 7) return 30_000;
+  if (attempts >= 3) return 5_000;
+  return 0;
+}
+
+export async function getLockState(): Promise<LockState> {
+  const raw = await SecureStore.getItemAsync(LOCK_KEY);
+  if (!raw) return { attempts: 0, lockedUntil: 0 };
+  try {
+    const parsed = JSON.parse(raw) as LockState;
+    return { attempts: parsed.attempts ?? 0, lockedUntil: parsed.lockedUntil ?? 0 };
+  } catch {
+    return { attempts: 0, lockedUntil: 0 };
+  }
+}
+
+export async function registerFailedAttempt(): Promise<LockState> {
+  const cur = await getLockState();
+  const attempts = cur.attempts + 1;
+  const ms = lockoutMsFor(attempts);
+  const next: LockState = { attempts, lockedUntil: ms > 0 ? Date.now() + ms : cur.lockedUntil };
+  await SecureStore.setItemAsync(LOCK_KEY, JSON.stringify(next));
+  return next;
+}
+
+export async function resetAttempts(): Promise<void> {
+  await SecureStore.deleteItemAsync(LOCK_KEY);
+}

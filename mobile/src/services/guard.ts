@@ -71,15 +71,25 @@ export function startGuard({ level, onEvent }: GuardOptions): GuardHandle {
 
   let batterySub: { remove: () => void } | null = null;
   if (cfg.watchCharger) {
+    // The listener also fires with the *current* state (not just changes), and
+    // "not charging" IS BatteryState.UNPLUGGED — so without seeding the previous
+    // state, arming an unplugged phone records a phantom "charger unplugged".
+    // Only genuine plugged↔unplugged transitions are evidence.
+    let prevState: Battery.BatteryState | null = null;
+    Battery.getBatteryStateAsync()
+      .then((s) => { if (prevState === null) prevState = s; })
+      .catch(() => {});
+
+    const isCharging = (s: Battery.BatteryState) =>
+      s === Battery.BatteryState.CHARGING || s === Battery.BatteryState.FULL;
+
     batterySub = Battery.addBatteryStateListener(({ batteryState }) => {
-      if (batteryState === Battery.BatteryState.UNPLUGGED) {
-        emit('charger_disconnected');
-      } else if (
-        batteryState === Battery.BatteryState.CHARGING ||
-        batteryState === Battery.BatteryState.FULL
-      ) {
-        emit('charger_connected');
-      }
+      if (batteryState === Battery.BatteryState.UNKNOWN) return;
+      const prev = prevState;
+      prevState = batteryState;
+      if (prev === null || prev === batteryState) return; // first reading / no change
+      if (!isCharging(prev) && isCharging(batteryState)) emit('charger_connected');
+      else if (isCharging(prev) && !isCharging(batteryState)) emit('charger_disconnected');
     });
   }
 

@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import * as Sharing from 'expo-sharing';
+import { usePreventScreenCapture } from 'expo-screen-capture';
 import { shareCatch } from '@/services/share';
 import { usePhantomStore } from '@/stores/phantom';
 import { Card, Badge, Button, SectionHeader, Divider } from '@/components/ui/components';
@@ -19,6 +20,8 @@ import { deleteIntruderPhoto, clearAllIntruderPhotos } from '@/services/camera';
 import { IntruderPhoto } from '@/constants/types';
 
 export default function VaultScreen() {
+  // Intruder photos and evidence must not be screenshottable or screen-recordable.
+  usePreventScreenCapture('vault');
   const { intruderPhotos, recentActivity, unlockEvents, unlockedLayers, clearLogs } =
     usePhantomStore();
   const [preview, setPreview] = useState<IntruderPhoto | null>(null);

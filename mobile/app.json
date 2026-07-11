@@ -8,6 +8,11 @@
     "icon": "./src/assets/images/icon.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
+    "runtimeVersion": { "policy": "appVersion" },
+    "updates": {
+      "url": "https://u.expo.dev/59774380-33f7-414a-ac86-52528266a0b9",
+      "fallbackToCacheTimeout": 0
+    },
     "splash": {
       "image": "./src/assets/images/splash-icon.png",
       "resizeMode": "contain",
@@ -18,7 +23,6 @@
       "bundleIdentifier": "dev.bonhomie95.phantomshield",
       "buildNumber": "1",
       "usesAppleSignIn": true,
-      "deploymentTarget": "15.1",
       "infoPlist": {
         "NSCameraUsageDescription": "PhantomShield captures intruder photos when unauthorized access is attempted. This is disclosed to you during setup and requires your explicit opt-in.",
         "NSFaceIDUsageDescription": "PhantomShield uses Face ID to verify your identity every time you open the app.",
@@ -50,7 +54,8 @@
         "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.PACKAGE_USAGE_STATS"
       ]
     },
     "plugins": [
@@ -64,7 +69,8 @@
         "expo-build-properties",
         {
           "ios": {
-            "useFrameworks": "static"
+            "useFrameworks": "static",
+            "deploymentTarget": "15.1"
           }
         }
       ],
@@ -96,7 +102,15 @@
           "sounds": []
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      [
+        "react-native-google-mobile-ads",
+        {
+          "androidAppId": "ca-app-pub-3940256099942544~3347511713",
+          "iosAppId": "ca-app-pub-3940256099942544~1458002511"
+        }
+      ],
+      "@sentry/react-native"
     ],
     "extra": {
       "eas": {

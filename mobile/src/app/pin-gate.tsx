@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { View, StyleSheet, TouchableOpacity, Text } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { usePreventScreenCapture } from 'expo-screen-capture';
 import { PinPad } from '@/components/PinPad';
 import { usePhantomStore } from '@/stores/phantom';
 import { PINLayer } from '@/constants/types';
@@ -11,7 +12,7 @@ import { sendIntruderAlert } from '@/services/notifications';
 import { checkTimeAnomaly } from '@/services/anomaly';
 import { shouldAlertOnAttempts } from '@/services/anomaly';
 import * as pinVault from '@/services/pinVault';
-import { uploadIntruderEvent } from '@/services/api';
+import { uploadIntruderEvent, uploadIntruderPhoto } from '@/services/api';
 
 const LAYER_LABELS: Record<PINLayer, string> = {
   dashboard: 'Dashboard',
@@ -22,6 +23,7 @@ const LAYER_LABELS: Record<PINLayer, string> = {
 };
 
 export default function PinGateScreen() {
+  usePreventScreenCapture('pin-gate');
   const { layer, redirect } = useLocalSearchParams<{ layer: PINLayer; redirect: string }>();
   const {
     unlockLayer,
@@ -114,15 +116,18 @@ export default function PinGateScreen() {
               anomalyReason: `Wrong PIN entered for ${layerLabel} (attempt ${attempts})`,
             });
 
-            // Report the intruder event to the backend (best-effort — the free
-            // plan gets a 403 here, which we swallow). Photo stays on-device
-            // until client-side encrypted upload is implemented.
-            uploadIntruderEvent({
-              id:            eventId,
-              timestamp:     Date.now(),
-              pinLayer:      layer ?? 'unknown',
-              failedAttempt: attempts,
-            }).catch(() => {});
+            // Upload the photo to R2 (paid plans), then report the event with
+            // its key. Best-effort — the free plan gets a 403/501 we swallow.
+            (async () => {
+              const key = await uploadIntruderPhoto(eventId, savedUri).catch(() => null);
+              uploadIntruderEvent({
+                id:            eventId,
+                timestamp:     Date.now(),
+                pinLayer:      layer ?? 'unknown',
+                failedAttempt: attempts,
+                encryptedPhotoKey: key ?? undefined,
+              }).catch(() => {});
+            })();
 
             // Only send alert on meaningful thresholds to avoid notification spam
             if (shouldAlertOnAttempts(attempts)) {

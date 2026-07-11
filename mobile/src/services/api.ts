@@ -4,6 +4,7 @@
  */
 
 import * as SecureStore from 'expo-secure-store';
+import * as FileSystem from 'expo-file-system/legacy';
 import { API_URL } from '@/constants/config';
 import { User } from '@/constants/types';
 import type { IntruderUpload, SyncBatch, DeviceCommand } from '@phantomshield/shared';
@@ -144,6 +145,22 @@ export async function signOut(deviceId: string) {
   await clearTokens();
 }
 
+/**
+ * Permanently delete the account and all server-side data (App Store /
+ * Play require in-app account deletion). Clears local tokens on success.
+ */
+export async function deleteAccount(): Promise<boolean> {
+  const res = await apiFetch('/dashboard/me', {
+    method: 'DELETE',
+    body: JSON.stringify({ confirm: 'DELETE MY ACCOUNT' }),
+  }).catch(() => null);
+  if (res?.ok) {
+    await clearTokens();
+    return true;
+  }
+  return false;
+}
+
 // ─── Activity sync ────────────────────────────────────────────────────────────
 
 export async function syncEvents(payload: SyncBatch) {
@@ -161,6 +178,33 @@ export async function uploadIntruderEvent(payload: IntruderUpload) {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+/**
+ * Upload the intruder photo itself to R2 via a presigned PUT and return the
+ * object key to attach to the event. Returns null if storage isn't configured
+ * (free plan, or R2 not set up) — the photo then just stays on-device.
+ */
+export async function uploadIntruderPhoto(id: string, fileUri: string): Promise<string | null> {
+  const res = await apiFetch('/sync/intruder/upload-url', {
+    method: 'POST',
+    body: JSON.stringify({ id }),
+  }).catch(() => null);
+  if (!res || !res.ok) return null;
+
+  const { key, uploadUrl } = await res.json().catch(() => ({} as any));
+  if (!key || !uploadUrl) return null;
+
+  try {
+    const up = await FileSystem.uploadAsync(uploadUrl, fileUri, {
+      httpMethod: 'PUT',
+      uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+      headers: { 'Content-Type': 'image/jpeg' },
+    });
+    return up.status >= 200 && up.status < 300 ? key : null;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Push token ────────────────────────────────────────────────────────────────

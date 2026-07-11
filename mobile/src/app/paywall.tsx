@@ -6,11 +6,16 @@ import { usePhantomStore } from '@/stores/phantom';
 import { getOffers, purchase, restorePurchases, isPurchasesConfigured, PlanOffer } from '@/services/purchases';
 import { track } from '@/services/analytics';
 
+// Fallback display prices, shown when RevenueCat offerings aren't available
+// (keys unset, store not reachable, first launch). KEEP IN SYNC with the
+// actual product prices configured in App Store Connect / Play Console —
+// the store sheet at purchase time always shows the real charge.
 const TIERS = [
   {
     id: 'guard',
     name: 'Phantom Guard',
     tagline: 'For everyday protection',
+    fallbackPrice: '$4.99 / month',
     highlight: false,
     features: [
       'Guard Mode anti-theft alarm',
@@ -24,6 +29,7 @@ const TIERS = [
     id: 'elite',
     name: 'Phantom Elite',
     tagline: 'Maximum security',
+    fallbackPrice: '$9.99 / month',
     highlight: true,
     features: [
       'Everything in Guard',
@@ -46,8 +52,11 @@ export default function PaywallScreen() {
     getOffers().then((o) => setOffers(o)).finally(() => setLoading(false));
   }, []);
 
-  const priceFor = (tierId: string) =>
-    offers.find((o) => o.id.toLowerCase().includes(tierId))?.price ?? '';
+  // Live store price when RevenueCat has offerings; fallback list price otherwise.
+  const priceFor = (tier: (typeof TIERS)[number]) => {
+    const live = offers.find((o) => o.id.toLowerCase().includes(tier.id))?.price;
+    return live ? `${live} / month` : tier.fallbackPrice;
+  };
 
   const handlePurchase = async (tierId: string) => {
     const offer = offers.find((o) => o.id.toLowerCase().includes(tierId));
@@ -86,7 +95,7 @@ export default function PaywallScreen() {
             {tier.highlight && <View style={s.badge}><Text style={s.badgeText}>MOST POPULAR</Text></View>}
             <Text style={s.tierName}>{tier.name}</Text>
             <Text style={s.tierTag}>{tier.tagline}</Text>
-            {priceFor(tier.id) ? <Text style={s.price}>{priceFor(tier.id)}</Text> : null}
+            <Text style={s.price}>{priceFor(tier)}</Text>
             <View style={s.features}>
               {tier.features.map((f) => (
                 <View key={f} style={s.featureRow}>

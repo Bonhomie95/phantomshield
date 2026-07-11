@@ -12,6 +12,8 @@ import { ensureIntruderDir } from '@/services/camera';
 import { registerPushToken, getAccessToken } from '@/services/api';
 import { pollAndApplyCommands } from '@/services/commands';
 import { configurePurchases } from '@/services/purchases';
+import { initMonitoring, identify } from '@/services/monitoring';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 
 export default function RootLayout() {
   const { isAuthenticated, isAppUnlocked, setAppUnlocked, user } = usePhantomStore();
@@ -20,7 +22,7 @@ export default function RootLayout() {
 
   // One-time cold-start setup
   useEffect(() => {
-    requestNotificationPermissions().catch(() => {});
+    initMonitoring();
     ensureIntruderDir().catch(() => {});
     const stopTracker = initTracker();
     return stopTracker;
@@ -72,6 +74,7 @@ export default function RootLayout() {
   }, [isAuthenticated, isAppUnlocked, setAppUnlocked]);
 
   return (
+    <ErrorBoundary>
     <GestureHandlerRootView style={s.root}>
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#080C12' } }}>
         <Stack.Screen name="index" />
@@ -79,6 +82,7 @@ export default function RootLayout() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="biometric-gate" options={{ animation: 'fade', gestureEnabled: false }} />
         <Stack.Screen name="pin-gate"        options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
+        <Stack.Screen name="permissions-intro" options={{ gestureEnabled: false }} />
         <Stack.Screen name="setup-pins" />
         <Stack.Screen name="guard-mode" options={{ animation: 'fade', gestureEnabled: false }} />
         <Stack.Screen name="paywall" options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
@@ -87,6 +91,7 @@ export default function RootLayout() {
       </Stack>
       <StatusBar style="light" />
     </GestureHandlerRootView>
+    </ErrorBoundary>
   );
 }
 

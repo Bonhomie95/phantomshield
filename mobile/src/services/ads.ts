@@ -23,9 +23,11 @@ async function load(): Promise<any | null> {
   if (triedLoad) return mod;
   triedLoad = true;
   try {
-    // Non-literal specifier keeps TS/Metro from hard-requiring the module.
-    const spec = 'react-native-google-mobile-ads';
-    mod = await import(spec);
+    // Static specifier — Metro only bundles modules it can resolve statically,
+    // so a variable import() would silently exclude the SDK from the JS bundle
+    // and ads would never load. The try/catch still degrades gracefully if the
+    // native module isn't linked (e.g. Expo Go).
+    mod = require('react-native-google-mobile-ads');
   } catch {
     mod = null;
   }

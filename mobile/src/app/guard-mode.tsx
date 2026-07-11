@@ -1,16 +1,17 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Image, AppState, AppStateStatus } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Image, AppState, AppStateStatus, ActivityIndicator } from 'react-native';
 import { router } from 'expo-router';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { usePreventScreenCapture } from 'expo-screen-capture';
 import { Colors, Spacing, FontSize, Radius } from '@/constants/theme';
 import { PinPad } from '@/components/PinPad';
 import { usePhantomStore } from '@/stores/phantom';
 import { startGuard, GuardHandle, GUARD_LEVELS, GUARD_LEVEL_SUMMARY } from '@/services/guard';
 import { saveIntruderPhoto } from '@/services/camera';
 import { captureLocation } from '@/services/location';
-import { uploadIntruderEvent } from '@/services/api';
+import { uploadIntruderEvent, uploadIntruderPhoto } from '@/services/api';
 import { showInterstitial } from '@/services/ads';
 import * as pinVault from '@/services/pinVault';
 import { GuardEvent, GuardEventType, GuardLevel } from '@/constants/types';
@@ -24,13 +25,16 @@ type Phase = 'setpin' | 'confirmpin' | 'config' | 'arming' | 'armed' | 'records'
 const ARM_DELAY_SEC = 5;
 const GUARD_PIN_LAYER = 'settings' as const;
 
+// Labels state only what the sensors can actually prove — no guessing. The OS
+// never tells a backgrounded app WHICH app took the foreground, so we say the
+// app was hidden/reopened rather than inventing "another app was opened".
 const EVENT_LABEL: Record<GuardEventType, string> = {
   motion:               'Phone was moved',
   charger_connected:    'Charger was plugged in',
   charger_disconnected: 'Charger was unplugged',
-  app_switch:           'Another app was opened',
-  disarm_attempt:       'Someone tried to stop Guard Mode',
-  wrong_pin:            'Wrong PIN entered',
+  app_switch:           'PhantomShield was hidden (Home pressed or app switched)',
+  disarm_attempt:       'Stop was attempted',
+  wrong_pin:            'Wrong PIN entered while trying to stop',
 };
 
 const EVENT_ICON: Record<GuardEventType, string> = {
@@ -39,7 +43,9 @@ const EVENT_ICON: Record<GuardEventType, string> = {
 };
 
 export default function GuardModeScreen() {
-  const { addGuardEvent, addIntruderPhoto, setGuardArmed } = usePhantomStore();
+  // The report (faces, locations) and PIN entry must not be capturable.
+  usePreventScreenCapture('guard-mode');
+  const { addGuardEvent, addIntruderPhoto, setGuardArmed, isAuthenticated } = usePhantomStore();
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
 
@@ -48,6 +54,9 @@ export default function GuardModeScreen() {
   const [level, setLevel] = useState<GuardLevel>('medium');
   const [firstPin, setFirstPin] = useState('');
   const [showPinFallback, setShowPinFallback] = useState(false);
+  // Disables Start/Stop while an ad or auth prompt is in flight so a second
+  // tap can't double-trigger the flow.
+  const [busy, setBusy] = useState(false);
   // Everything captured during THIS session — revealed only when stopped.
   const [sessionEvents, setSessionEvents] = useState<GuardEvent[]>([]);
   const guardRef = useRef<GuardHandle | null>(null);
@@ -112,14 +121,19 @@ export default function GuardModeScreen() {
         });
       }
 
-      // Best-effort backend report (free plan gets a 403 here, which we swallow).
-      uploadIntruderEvent({
-        id,
-        timestamp: Date.now(),
-        pinLayer: 'guard',
-        failedAttempt: 1,
-        location: loc ?? undefined,
-      }).catch(() => {});
+      // Upload the photo to R2 (paid plans), then report the event with its key.
+      // Both are best-effort — a free plan gets a 403/501 which we swallow.
+      (async () => {
+        const key = imageUri ? await uploadIntruderPhoto(id, imageUri).catch(() => null) : null;
+        uploadIntruderEvent({
+          id,
+          timestamp: Date.now(),
+          pinLayer: 'guard',
+          failedAttempt: 1,
+          location: loc ?? undefined,
+          encryptedPhotoKey: key ?? undefined,
+        }).catch(() => {});
+      })();
     },
     [addGuardEvent, addIntruderPhoto],
   );
@@ -150,19 +164,22 @@ export default function GuardModeScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, level]);
 
-  // ── Detect app switches (someone leaving to open another app) ────────────────
+  // ── Detect the app being hidden (High level only) ────────────────────────────
+  // Only a real 'background' transition counts. iOS also fires 'inactive' for
+  // the notification shade, control centre, and Face ID prompts — none of which
+  // prove anyone left the app, so they are deliberately ignored.
   useEffect(() => {
     if (phase !== 'armed') return;
     const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
       if (!guardRef.current?.watchesAppSwitch) return;
-      if (next === 'background' || next === 'inactive') {
-        // Can't snap while backgrounding, but record that they left.
+      if (next === 'background') {
+        // Camera is unavailable while backgrounded — record the fact only.
         leftAppRef.current = true;
         void captureAndRecord('app_switch', { snap: false });
       } else if (next === 'active' && leftAppRef.current) {
         leftAppRef.current = false;
-        // They came back — now the camera works, so grab their face.
-        void captureAndRecord('app_switch', { snap: true, reason: 'Returned to the phone' });
+        // They came back — the camera works again, so capture who it is.
+        void captureAndRecord('app_switch', { snap: true, reason: 'PhantomShield was reopened' });
       }
     });
     return () => sub.remove();
@@ -181,23 +198,37 @@ export default function GuardModeScreen() {
     void showInterstitial();
   }, [sessionEvents.length, setGuardArmed]);
 
-  const attemptStop = useCallback(async () => {
-    const hasHw = await LocalAuthentication.hasHardwareAsync();
-    const enrolled = await LocalAuthentication.isEnrolledAsync();
-    if (hasHw && enrolled) {
-      const res = await LocalAuthentication.authenticateAsync({
-        promptMessage: 'Verify your identity to stop Guard Mode',
-        cancelLabel: 'Cancel',
-      });
-      if (res.success) return finishStop();
-    }
-    // Falling back to the PIN means someone is actively trying to stop it —
-    // record the attempt (and their face) before showing the pad.
-    void captureAndRecord('disarm_attempt');
+  // Stopping always asks for the PIN the user set — never the phone's own
+  // passcode. (The OS biometric prompt's default fallback is the DEVICE PIN,
+  // which confused users who had just created a Guard PIN.)
+  const attemptStop = useCallback(() => {
+    if (busy) return;
     setShowPinFallback(true);
-  }, [finishStop, captureAndRecord]);
+  }, [busy]);
 
-  // A wrong PIN entered while trying to stop is itself evidence.
+  // Optional convenience: biometrics may stop Guard Mode, but with the device-
+  // passcode fallback disabled so the phone PIN can never bypass the Guard PIN.
+  const tryBiometricStop = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const hasHw = await LocalAuthentication.hasHardwareAsync();
+      const enrolled = await LocalAuthentication.isEnrolledAsync();
+      if (!hasHw || !enrolled) return;
+      const res = await LocalAuthentication.authenticateAsync({
+        promptMessage: 'Stop Guard Mode',
+        cancelLabel: 'Use PIN',
+        disableDeviceFallback: true,
+      });
+      if (res.success) finishStop();
+    } catch {
+      // fall through — the PIN pad stays available
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, finishStop]);
+
+  // A wrong PIN entered while trying to stop is itself evidence — snap a face.
   const handleWrongPin = useCallback(() => {
     void captureAndRecord('wrong_pin');
   }, [captureAndRecord]);
@@ -232,10 +263,16 @@ export default function GuardModeScreen() {
 
   // ── Start button (ad "to start", then countdown) ────────────────────────────
   const handleStart = useCallback(async () => {
-    await showInterstitial();
-    setCountdown(ARM_DELAY_SEC);
-    setPhase('arming');
-  }, []);
+    if (busy) return;
+    setBusy(true);
+    try {
+      await showInterstitial();
+      setCountdown(ARM_DELAY_SEC);
+      setPhase('arming');
+    } finally {
+      setBusy(false);
+    }
+  }, [busy]);
 
   // Clean up if torn down while armed.
   useEffect(() => {
@@ -303,7 +340,21 @@ export default function GuardModeScreen() {
           ))}
         </View>
 
-        <Text style={s.recordsHint}>Face snapshots are also saved in your Vault.</Text>
+        <Text style={s.recordsHint}>
+          {isAuthenticated
+            ? 'Snapshots are saved in the Vault tab (unlock it with your Vault PIN).'
+            : 'Snapshots are stored on this device. Sign in to browse them anytime in the Vault tab.'}
+        </Text>
+
+        {isAuthenticated && sessionEvents.some((e) => e.imageUri) && (
+          <TouchableOpacity
+            style={s.secondaryBtn}
+            onPress={() => router.replace('/(tabs)/vault')}
+            activeOpacity={0.85}
+          >
+            <Text style={s.secondaryText}>Open Vault</Text>
+          </TouchableOpacity>
+        )}
 
         <TouchableOpacity style={s.primaryBtn} onPress={() => router.back()} activeOpacity={0.85}>
           <Text style={s.primaryText}>Done</Text>
@@ -318,13 +369,21 @@ export default function GuardModeScreen() {
       <View style={s.container}>
         <HiddenCamera enabled={cameraEnabled} cameraRef={cameraRef} />
         {showPinFallback ? (
-          <PinPad
-            title="Enter PIN to stop"
-            subtitle="Enter your PhantomShield PIN to stop Guard Mode."
-            verify={verifyPin}
-            onSuccess={finishStop}
-            onFail={handleWrongPin}
-          />
+          <>
+            <PinPad
+              title="Enter PIN to stop"
+              subtitle="Enter the PIN you set for PhantomShield."
+              verify={verifyPin}
+              onSuccess={finishStop}
+              onFail={handleWrongPin}
+            />
+            <TouchableOpacity onPress={tryBiometricStop} style={s.cancel}>
+              <Text style={s.linkText}>Use Face ID / Fingerprint instead</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setShowPinFallback(false)} style={s.cancel}>
+              <Text style={s.cancelText}>Back</Text>
+            </TouchableOpacity>
+          </>
         ) : (
           <>
             <View style={s.armedPulse}>
@@ -334,8 +393,15 @@ export default function GuardModeScreen() {
             <Text style={s.sub}>
               Watching quietly. Whatever happens is recorded and shown only to you when you stop.
             </Text>
-            <TouchableOpacity style={s.primaryBtn} onPress={attemptStop} activeOpacity={0.85}>
-              <Text style={s.primaryText}>Stop</Text>
+            <TouchableOpacity
+              style={[s.primaryBtn, busy && s.btnDisabled]}
+              onPress={attemptStop}
+              disabled={busy}
+              activeOpacity={0.85}
+            >
+              {busy
+                ? <ActivityIndicator color={Colors.bg} />
+                : <Text style={s.primaryText}>Stop</Text>}
             </TouchableOpacity>
           </>
         )}
@@ -376,10 +442,17 @@ export default function GuardModeScreen() {
             ))}
           </View>
 
-          <TouchableOpacity style={s.primaryBtn} onPress={handleStart} activeOpacity={0.85}>
-            <Text style={s.primaryText}>Start Guard Mode</Text>
+          <TouchableOpacity
+            style={[s.primaryBtn, busy && s.btnDisabled]}
+            onPress={handleStart}
+            disabled={busy}
+            activeOpacity={0.85}
+          >
+            {busy
+              ? <ActivityIndicator color={Colors.bg} />
+              : <Text style={s.primaryText}>Start Guard Mode</Text>}
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => router.back()} style={s.cancel}>
+          <TouchableOpacity onPress={() => router.back()} style={s.cancel} disabled={busy}>
             <Text style={s.cancelText}>Cancel</Text>
           </TouchableOpacity>
         </>
@@ -414,8 +487,16 @@ const s = StyleSheet.create({
   armedDot: { width: 20, height: 20, borderRadius: 10, backgroundColor: Colors.success },
   primaryBtn: { marginTop: Spacing.lg, backgroundColor: Colors.primary, borderRadius: Radius.md, paddingVertical: 16, paddingHorizontal: 48, alignItems: 'center', alignSelf: 'stretch' },
   primaryText: { fontSize: FontSize.md, fontWeight: '800', color: Colors.bg, textAlign: 'center' },
+  secondaryBtn: {
+    marginTop: Spacing.md, borderWidth: 1, borderColor: Colors.primary + '55',
+    backgroundColor: Colors.primaryGlow, borderRadius: Radius.md,
+    paddingVertical: 14, alignItems: 'center', alignSelf: 'stretch',
+  },
+  secondaryText: { fontSize: FontSize.sm, fontWeight: '700', color: Colors.primary },
+  btnDisabled: { opacity: 0.6 },
   cancel: { marginTop: Spacing.md },
   cancelText: { fontSize: FontSize.sm, color: Colors.textSecondary },
+  linkText: { fontSize: FontSize.sm, color: Colors.primary, fontWeight: '600' },
   // Records
   recordsScroll: { flex: 1, backgroundColor: Colors.bg },
   recordsContainer: { padding: Spacing.xl, paddingTop: 72, alignItems: 'center', gap: Spacing.sm },

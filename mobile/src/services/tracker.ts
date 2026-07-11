@@ -17,6 +17,7 @@ import { usePhantomStore } from '@/stores/phantom';
 import { checkTimeAnomaly } from '@/services/anomaly';
 import { sendAnomalyAlert } from '@/services/notifications';
 import { getOrCreateDeviceId, getAccessToken, syncEvents } from '@/services/api';
+import { collectAndSyncUsage } from '@/services/usageTracking';
 
 // ─── Expo Go detection ────────────────────────────────────────────────────────
 
@@ -120,6 +121,10 @@ async function handleAppStateChange(nextState: AppStateStatus) {
     if (anomaly.isAnomaly && anomaly.reason) {
       sendAnomalyAlert(anomaly.reason).catch(() => {});
     }
+
+    // Pull any Android app-usage events accrued while we were backgrounded
+    // (plan-gated + permission-gated inside the service).
+    void collectAndSyncUsage();
   }
 
   if (prevAppState === 'active' && nextState.match(/inactive|background/)) {

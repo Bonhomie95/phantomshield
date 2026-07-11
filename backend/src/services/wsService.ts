@@ -2,24 +2,51 @@ import { FastifyPluginAsync } from 'fastify';
 import { WebSocket } from 'ws';
 import { JWTPayload, WSMessage } from '@/types';
 import { Device, User } from '@/models';
-import { setDeviceOnline, setDeviceOffline, popDeviceCommands } from '@/config/redis';
+import { setDeviceOnline, setDeviceOffline, popDeviceCommands, getRedis } from '@/config/redis';
 
-// ─── Connection Registry (in-process) ─────────────────────────────────────────
-// In production with multiple instances, use Redis Pub/Sub instead
+// ─── Connection Registry (per-instance) ───────────────────────────────────────
+// Sockets live on whichever instance the client connected to. To broadcast
+// across instances we publish on a Redis channel; every instance delivers to
+// its own local sockets, so each socket receives a message exactly once.
 
 type UserConnections = Map<string, Set<WebSocket>>;
 const connections: UserConnections = new Map();
 
-export const wsBroadcastToUser = (userId: string, message: WSMessage): void => {
+const WS_CHANNEL = 'ws:user_broadcast';
+let subscriber: ReturnType<typeof getRedis> | null = null;
+
+// Deliver to this instance's own sockets for the user.
+const deliverLocal = (userId: string, message: WSMessage): void => {
   const userConns = connections.get(userId);
   if (!userConns || userConns.size === 0) return;
-
   const payload = JSON.stringify(message);
   for (const ws of userConns) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(payload);
-    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(payload);
   }
+};
+
+/** Subscribe this instance to cross-instance WS broadcasts. Call once at boot. */
+export const initWsPubSub = (): void => {
+  if (subscriber) return;
+  subscriber = getRedis().duplicate();
+  subscriber.subscribe(WS_CHANNEL).catch((err) =>
+    console.error('[WS] pubsub subscribe failed:', err?.message ?? err),
+  );
+  subscriber.on('message', (_channel, raw) => {
+    try {
+      const { userId, message } = JSON.parse(raw);
+      deliverLocal(userId, message);
+    } catch {
+      /* ignore malformed */
+    }
+  });
+};
+
+export const wsBroadcastToUser = (userId: string, message: WSMessage): void => {
+  // Publish so every instance (including this one) delivers to its own sockets.
+  getRedis()
+    .publish(WS_CHANNEL, JSON.stringify({ userId, message }))
+    .catch(() => deliverLocal(userId, message)); // fall back to local if publish fails
 };
 
 export const wsGetConnectionCount = (): number => {

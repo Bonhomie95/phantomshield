@@ -1,4 +1,5 @@
 import { FastifyPluginAsync } from 'fastify';
+import { z } from 'zod';
 import { authenticate, requirePlan } from '@/middleware/auth';
 import { Device } from '@/models';
 import { JWTPayload } from '@/types';
@@ -173,11 +174,13 @@ const deviceRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(403).send({ error: 'You can only update your current device.' });
     }
 
-    const body = request.body as {
-      pushToken?: string;
-      appVersion?: string;
-      osVersion?: string;
-    };
+    const parsed = z.object({
+      pushToken:  z.string().max(256).optional(),
+      appVersion: z.string().max(32).optional(),
+      osVersion:  z.string().max(64).optional(),
+    }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+    const body = parsed.data;
 
     const device = await Device.findOne({ deviceId, userId: user.userId });
     if (!device) return reply.code(404).send({ error: 'Device not found.' });

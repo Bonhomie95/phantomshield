@@ -48,14 +48,22 @@ export const verifyRefreshToken = async (
 ): Promise<{ userId: string } | null> => {
   const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
 
-  const record = await RefreshToken.findOne({
-    tokenHash,
-    deviceId,
-    isRevoked: false,
-    expiresAt: { $gt: new Date() },
-  });
-
+  // Look the token up regardless of state so we can distinguish "unknown" from
+  // "known but already rotated" — the latter is a reuse/replay signal.
+  const record = await RefreshToken.findOne({ tokenHash, deviceId });
   if (!record) return null;
+
+  if (record.isRevoked || record.expiresAt <= new Date()) {
+    // A rotated refresh token was presented again. In normal rotation the old
+    // token is never reused, so this means it was captured and replayed —
+    // revoke every token for this user+device to force a fresh sign-in.
+    await RefreshToken.updateMany(
+      { userId: record.userId, deviceId },
+      { isRevoked: true }
+    );
+    console.warn(`[Auth] Refresh token reuse detected for user ${record.userId} / device ${deviceId} — family revoked.`);
+    return null;
+  }
 
   return { userId: record.userId.toString() };
 };

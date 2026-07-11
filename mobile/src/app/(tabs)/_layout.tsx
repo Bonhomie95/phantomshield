@@ -1,6 +1,7 @@
 import React from 'react';
 import { Text } from 'react-native';
 import { Tabs } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/theme';
 
 function TabIcon({ emoji, active }: { emoji: string; active: boolean }) {
@@ -8,6 +9,11 @@ function TabIcon({ emoji, active }: { emoji: string; active: boolean }) {
 }
 
 export default function TabLayout() {
+  // Android is edge-to-edge in SDK 54+, so the system navigation bar (buttons
+  // or gesture pill) overlays the bottom of the screen. Pad the tab bar by the
+  // bottom inset or the tabs render underneath it and can't be tapped.
+  const insets = useSafeAreaInsets();
+
   return (
     <Tabs
       screenOptions={{
@@ -16,8 +22,8 @@ export default function TabLayout() {
           backgroundColor: Colors.bgCard,
           borderTopColor: Colors.bgBorder,
           borderTopWidth: 1,
-          height: 60,
-          paddingBottom: 8,
+          height: 60 + insets.bottom,
+          paddingBottom: 8 + insets.bottom,
         },
         tabBarActiveTintColor: Colors.primary,
         tabBarInactiveTintColor: Colors.textMuted,

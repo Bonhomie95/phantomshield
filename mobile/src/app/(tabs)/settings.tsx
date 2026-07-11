@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,13 +9,18 @@ import {
   Alert,
   Modal,
   TextInput,
+  AppState,
+  Platform,
 } from 'react-native';
 import { router } from 'expo-router';
 import { usePhantomStore } from '@/stores/phantom';
 import { Card, SectionHeader, Badge, Button, Divider } from '@/components/ui/components';
 import { Colors, Spacing, FontSize, Radius } from '@/constants/theme';
-import { clearTokens, signOut, getOrCreateDeviceId } from '@/services/api';
+import * as WebBrowser from 'expo-web-browser';
+import { clearTokens, signOut, getOrCreateDeviceId, deleteAccount } from '@/services/api';
 import { SafeZone, PINLayer } from '@/constants/types';
+import { LEGAL } from '@/constants/config';
+import { usageSupported, usageGranted, openUsageAccessSettings } from '@/services/usageTracking';
 
 // ─── Setting row ──────────────────────────────────────────────────────────────
 
@@ -158,6 +163,20 @@ export default function SettingsScreen() {
   const [editingZone, setEditingZone]       = useState<SafeZone | undefined>();
   const isSettingsUnlocked = unlockedLayers.includes('settings');
 
+  // Android app-usage access status — re-checked when returning from Settings.
+  const usageAvailable = Platform.OS === 'android' && usageSupported();
+  const [usageOn, setUsageOn] = useState(false);
+  const refreshUsage = useCallback(() => {
+    if (usageAvailable) setUsageOn(usageGranted());
+  }, [usageAvailable]);
+  useEffect(() => {
+    refreshUsage();
+    const sub = AppState.addEventListener('change', (s) => { if (s === 'active') refreshUsage(); });
+    return () => sub.remove();
+  }, [refreshUsage]);
+
+  const isPaid = user?.plan === 'guard' || user?.plan === 'elite';
+
   const requirePin = (action: () => void) => {
     if (!isSettingsUnlocked) {
       router.push({ pathname: '/pin-gate', params: { layer: 'settings', redirect: '/(tabs)/settings' } });
@@ -188,6 +207,34 @@ export default function SettingsScreen() {
   const handleChangePIN = (layer: PINLayer, label: string) => {
     requirePin(() =>
       router.push({ pathname: '/setup-pins', params: { singleLayer: layer, label } })
+    );
+  };
+
+  const handleDeleteAccount = () => {
+    requirePin(() =>
+      Alert.alert(
+        'Delete Account',
+        'This permanently deletes your account and ALL data — activity, intruder photos, devices, and subscriptions link. This cannot be undone.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete Everything',
+            style: 'destructive',
+            onPress: async () => {
+              const ok = await deleteAccount();
+              if (ok) {
+                setUser(null);
+                setAuthenticated(false);
+                setAppUnlocked(false);
+                lockAllLayers();
+                router.replace('/(auth)/welcome');
+              } else {
+                Alert.alert('Could not delete', 'Something went wrong. Please try again.');
+              }
+            },
+          },
+        ],
+      ),
     );
   };
 
@@ -286,6 +333,38 @@ export default function SettingsScreen() {
               value={intruderSnapshotEnabled}
               onValueChange={(v) => requirePin(() => setIntruderSnapshotEnabled(v))}
             />
+            {usageAvailable && (
+              <>
+                <Divider />
+                <SettingRow
+                  icon="📲"
+                  title="App Usage Logging"
+                  subtitle={
+                    !isPaid
+                      ? 'Guard/Elite feature — logs which apps open (never their content)'
+                      : usageOn
+                      ? 'Granted — logging which apps open, and when'
+                      : 'Tap to grant Usage Access (logs app opens, never content)'
+                  }
+                  badge={usageOn ? 'ON' : isPaid ? 'GRANT' : 'PAID'}
+                  badgeVariant={usageOn ? 'green' : isPaid ? 'cyan' : 'warning'}
+                  onPress={() =>
+                    !isPaid
+                      ? router.push('/paywall')
+                      : requirePin(() => {
+                          Alert.alert(
+                            'App Usage Access',
+                            'PhantomShield reads only which apps are opened and when — never messages, passwords, or any screen content. Grant "Usage access" on the next screen.',
+                            [
+                              { text: 'Cancel', style: 'cancel' },
+                              { text: 'Open Settings', onPress: () => openUsageAccessSettings() },
+                            ],
+                          );
+                        })
+                  }
+                />
+              </>
+            )}
           </Card>
         </View>
 
@@ -392,6 +471,32 @@ export default function SettingsScreen() {
               title="Sign Out"
               danger
               onPress={handleSignOut}
+            />
+            <Divider />
+            <SettingRow
+              icon="🗑️"
+              title="Delete Account"
+              subtitle="Permanently erase your account and all data"
+              danger
+              onPress={handleDeleteAccount}
+            />
+          </Card>
+        </View>
+
+        {/* Legal */}
+        <View style={styles.section}>
+          <SectionHeader title="Legal" />
+          <Card>
+            <SettingRow
+              icon="📄"
+              title="Terms of Service"
+              onPress={() => WebBrowser.openBrowserAsync(LEGAL.terms)}
+            />
+            <Divider />
+            <SettingRow
+              icon="🔏"
+              title="Privacy Policy"
+              onPress={() => WebBrowser.openBrowserAsync(LEGAL.privacy)}
             />
           </Card>
         </View>

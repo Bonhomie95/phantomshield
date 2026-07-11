@@ -30,6 +30,14 @@ async function verifyGoogleToken(idToken: string): Promise<VerifiedOAuthIdentity
     process.env.GOOGLE_ANDROID_CLIENT_ID!,
   ].filter(Boolean);
 
+  // An empty audience list rejects EVERY token with a confusing
+  // "Wrong recipient" error — fail with the actual cause instead.
+  if (audience.length === 0) {
+    throw new Error(
+      'No GOOGLE_CLIENT_ID / GOOGLE_IOS_CLIENT_ID / GOOGLE_ANDROID_CLIENT_ID configured on the server.',
+    );
+  }
+
   const ticket  = await googleClient.verifyIdToken({ idToken, audience });
   const payload = ticket.getPayload();
   if (!payload || !payload.email) throw new Error('Invalid Google token payload.');
@@ -44,7 +52,7 @@ async function verifyGoogleToken(idToken: string): Promise<VerifiedOAuthIdentity
 
 async function verifyAppleToken(idToken: string): Promise<VerifiedOAuthIdentity> {
   const payload = await appleSignin.verifyIdToken(idToken, {
-    audience:          process.env.APPLE_BUNDLE_ID ?? 'dev.bonhomieinc.phantomshield',
+    audience:          process.env.APPLE_BUNDLE_ID ?? 'dev.bonhomie95.phantomshield',
     ignoreExpiration:  false,
   });
 

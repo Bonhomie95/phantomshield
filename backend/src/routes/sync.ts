@@ -6,6 +6,7 @@ import { authenticate, requirePlan } from '@/middleware/auth';
 import { ActivityEvent, IntruderEvent, Device } from '@/models';
 import { JWTPayload, PLAN_LIMITS, SyncBatchPayload } from '@/types';
 import { wsBroadcastToUser } from '@/services/wsService';
+import { isStorageConfigured, intruderKey, presignUpload, presignDownload } from '@/services/storage';
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -220,8 +221,9 @@ const syncRoutes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    // Photo is already encrypted by the client — store URL placeholder
-    // In production: upload to Cloudflare R2 here
+    // The photo itself is uploaded straight to R2 by the device via a presigned
+    // PUT (see POST /sync/intruder/upload-url). Here we only persist the object
+    // key the client reported, if any — never the image bytes.
     const event = await IntruderEvent.create({
       userId:           user.userId,
       deviceId:         (request.headers['x-device-id'] as string) ?? 'unknown',
@@ -229,7 +231,7 @@ const syncRoutes: FastifyPluginAsync = async (fastify) => {
       timestamp:        new Date(data.timestamp),
       pinLayer:         data.pinLayer,
       failedAttempt:    data.failedAttempt,
-      photoUrl:         data.photoBase64 ? `r2://intruder/${user.userId}/${data.id}.enc` : undefined,
+      photoUrl:         data.encryptedPhotoKey,   // R2 object key, or undefined
       location:         data.location,
       encryptedPhotoKey: data.encryptedPhotoKey,
     });
@@ -260,7 +262,30 @@ const syncRoutes: FastifyPluginAsync = async (fastify) => {
       .select('-__v -_id -userId')
       .lean();
 
-    return reply.code(200).send({ events, count: events.length });
+    // Swap stored R2 object keys for short-lived presigned GET URLs the
+    // dashboard can render directly.
+    const withUrls = events.map((e) => ({
+      ...e,
+      photoUrl: e.photoUrl && isStorageConfigured() ? presignDownload(e.photoUrl) : undefined,
+    }));
+
+    return reply.code(200).send({ events: withUrls, count: withUrls.length });
+  });
+
+  // ── POST /sync/intruder/upload-url — presigned PUT for the photo ──
+  // The device uploads the JPEG straight to R2 over TLS; we never touch bytes.
+  fastify.post('/intruder/upload-url', {
+    preHandler: [authenticate, requirePlan('guard', 'elite')],
+  }, async (request, reply) => {
+    const user = request.user as JWTPayload;
+    if (!isStorageConfigured()) {
+      return reply.code(501).send({ error: 'Photo storage is not configured.' });
+    }
+    const parsed = z.object({ id: z.string().min(1).max(64) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+    const key = intruderKey(user.userId, parsed.data.id);
+    return reply.code(200).send({ key, uploadUrl: presignUpload(key), expiresIn: 300 });
   });
 };
 

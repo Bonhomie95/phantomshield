@@ -16,10 +16,11 @@ import {
   statusCodes,
 } from "@react-native-google-signin/google-signin";
 import * as AppleAuthentication from "expo-apple-authentication";
+import * as WebBrowser from "expo-web-browser";
 import Constants from "expo-constants";
 import { ShieldLogo } from "@/components/ShieldLogo";
 import { Colors, Spacing, FontSize, Radius } from "@/constants/theme";
-import { GOOGLE } from "@/constants/config";
+import { GOOGLE, LEGAL } from "@/constants/config";
 import { oauthSignIn, storeTokens, getOrCreateDeviceId } from "@/services/api";
 import { usePhantomStore } from "@/stores/phantom";
 import { track } from "@/services/analytics";
@@ -104,7 +105,9 @@ export default function WelcomeScreen() {
         result.isNewUser ??
         Date.now() - new Date(result.user.createdAt).getTime() < 10_000;
       track(isNew ? "sign_up" : "sign_in", { provider });
-      router.replace(isNew ? "/setup-pins" : "/biometric-gate");
+      // New users see the permission explainer (which leads to PIN setup);
+      // returning users go straight to the biometric gate.
+      router.replace(isNew ? "/permissions-intro" : "/biometric-gate");
     } catch (err: any) {
       Alert.alert(
         "Sign-In Failed",
@@ -213,36 +216,7 @@ export default function WelcomeScreen() {
         <Text style={styles.tagline}>Your phone. Your eyes. Always.</Text>
       </Animated.View>
 
-      {/* Feature cards */}
-      <View style={styles.features}>
-        {FEATURES.map((f, i) => (
-          <Animated.View
-            key={i}
-            style={[
-              styles.featureCard,
-              { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
-            ]}
-          >
-            <Text style={styles.featureIcon}>{f.icon}</Text>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.featureTitle}>{f.title}</Text>
-              <Text style={styles.featureDesc}>{f.desc}</Text>
-            </View>
-          </Animated.View>
-        ))}
-      </View>
-
-      {/* Transparency notice */}
-      <View style={styles.notice}>
-        <Text style={{ fontSize: 16, marginTop: 1 }}>ℹ️</Text>
-        <Text style={styles.noticeText}>
-          PhantomShield only monitors{" "}
-          <Text style={{ color: Colors.primary }}>your own device</Text>. You
-          are always aware and in control. Nothing runs without your activation.
-        </Text>
-      </View>
-
-      {/* ── Auth buttons ── */}
+      {/* ── Auth buttons — above the fold so nobody has to hunt for them ── */}
       <View style={styles.authSection}>
         {/* Google */}
         <TouchableOpacity
@@ -279,22 +253,63 @@ export default function WelcomeScreen() {
             onPress={handleAppleSignIn}
           />
         )}
+
+        {/* Value moment — let people feel the product before signing up. */}
+        <TouchableOpacity
+          style={styles.tryBtn}
+          onPress={() => router.push("/guard-mode")}
+          disabled={disabled}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.tryText}>🛡  Try Guard Mode — no account needed</Text>
+        </TouchableOpacity>
       </View>
 
-      {/* Value moment — let people feel the product before signing up. */}
-      <TouchableOpacity
-        style={styles.tryBtn}
-        onPress={() => router.push("/guard-mode")}
-        disabled={disabled}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.tryText}>🛡  Try Guard Mode — no account needed</Text>
-      </TouchableOpacity>
+      {/* Feature cards — informational, fine below the fold */}
+      <View style={styles.features}>
+        {FEATURES.map((f, i) => (
+          <Animated.View
+            key={i}
+            style={[
+              styles.featureCard,
+              { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
+            ]}
+          >
+            <Text style={styles.featureIcon}>{f.icon}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.featureTitle}>{f.title}</Text>
+              <Text style={styles.featureDesc}>{f.desc}</Text>
+            </View>
+          </Animated.View>
+        ))}
+      </View>
+
+      {/* Transparency notice */}
+      <View style={styles.notice}>
+        <Text style={{ fontSize: 16, marginTop: 1 }}>ℹ️</Text>
+        <Text style={styles.noticeText}>
+          PhantomShield only monitors{" "}
+          <Text style={{ color: Colors.primary }}>your own device</Text>. You
+          are always aware and in control. Nothing runs without your activation.
+        </Text>
+      </View>
 
       <Text style={styles.legal}>
         By continuing you agree to our{" "}
-        <Text style={{ color: Colors.primary }}>Terms of Service</Text> and{" "}
-        <Text style={{ color: Colors.primary }}>Privacy Policy</Text>.
+        <Text
+          style={{ color: Colors.primary }}
+          onPress={() => WebBrowser.openBrowserAsync(LEGAL.terms)}
+        >
+          Terms of Service
+        </Text>{" "}
+        and{" "}
+        <Text
+          style={{ color: Colors.primary }}
+          onPress={() => WebBrowser.openBrowserAsync(LEGAL.privacy)}
+        >
+          Privacy Policy
+        </Text>
+        .
       </Text>
     </ScrollView>
   );
@@ -306,8 +321,8 @@ const styles = StyleSheet.create({
 
   hero: {
     alignItems: "center",
-    paddingTop: 60,
-    paddingBottom: Spacing.xl,
+    paddingTop: 36,
+    paddingBottom: Spacing.lg,
     gap: 6,
   },
   brand: {
@@ -404,7 +419,6 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
     paddingVertical: 14,
     alignItems: "center",
-    marginBottom: Spacing.md,
   },
   tryText: {
     fontSize: FontSize.sm,

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { Colors, Spacing, FontSize, Radius } from '@/constants/theme';
+import * as pinVault from '@/services/pinVault';
 
 interface PinPadProps {
   title: string;
@@ -41,6 +42,20 @@ export function PinPad({
   const [locked, setLocked]   = useState(false);
   const [lockSecs, setLockSecs] = useState(0);
   const shakeAnim = useRef(new Animated.Value(0)).current;
+  const lockTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Verify mode: restore any persisted lockout so a relaunch can't bypass it.
+  useEffect(() => {
+    if (mode !== 'verify') return;
+    (async () => {
+      const st = await pinVault.getLockState();
+      setAttempts(st.attempts);
+      const remaining = Math.ceil((st.lockedUntil - Date.now()) / 1000);
+      if (remaining > 0) startLockoutUntil(st.lockedUntil);
+    })();
+    return () => { if (lockTimer.current) clearInterval(lockTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const shake = () => {
     Animated.sequence([
@@ -53,14 +68,19 @@ export function PinPad({
     Vibration.vibrate(200);
   };
 
-  const startLockout = (seconds: number) => {
+  const startLockoutUntil = (untilMs: number) => {
+    if (lockTimer.current) clearInterval(lockTimer.current);
     setLocked(true);
-    setLockSecs(seconds);
-    const interval = setInterval(() => {
-      setLockSecs((prev) => {
-        if (prev <= 1) { clearInterval(interval); setLocked(false); return 0; }
-        return prev - 1;
-      });
+    setLockSecs(Math.max(0, Math.ceil((untilMs - Date.now()) / 1000)));
+    lockTimer.current = setInterval(() => {
+      const remaining = Math.ceil((untilMs - Date.now()) / 1000);
+      if (remaining <= 0) {
+        if (lockTimer.current) clearInterval(lockTimer.current);
+        setLocked(false);
+        setLockSecs(0);
+      } else {
+        setLockSecs(remaining);
+      }
     }, 1000);
   };
 
@@ -93,23 +113,18 @@ export function PinPad({
 
         if (accepted) {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          await pinVault.resetAttempts();
           onSuccess(next);
           setPin('');
         } else {
           shake();
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-          const newAttempts = attempts + 1;
-          setAttempts(newAttempts);
-          onFail?.(newAttempts);
           setPin('');
-
-          if (newAttempts >= maxAttempts) {
-            startLockout(60);
-          } else if (newAttempts >= 7) {
-            startLockout(30);
-          } else if (newAttempts >= 3) {
-            startLockout(5);
-          }
+          // Persist the failure so the lockout survives an app relaunch.
+          const st = await pinVault.registerFailedAttempt();
+          setAttempts(st.attempts);
+          onFail?.(st.attempts);
+          if (st.lockedUntil > Date.now()) startLockoutUntil(st.lockedUntil);
         }
       }, 80);
     }

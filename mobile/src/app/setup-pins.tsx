@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
+import { usePreventScreenCapture } from 'expo-screen-capture';
 import { PinPad } from '@/components/PinPad';
 import { Colors, Spacing, FontSize, Radius } from '@/constants/theme';
 import { PINLayer } from '@/constants/types';
@@ -17,6 +18,7 @@ const LAYERS: { layer: PINLayer; label: string; desc: string; icon: string }[] =
 type Step = 'overview' | 'entering' | 'confirming';
 
 export default function SetupPinsScreen() {
+  usePreventScreenCapture('setup-pins');
   const params = useLocalSearchParams<{ singleLayer?: PINLayer; label?: string }>();
 
   // When launched from settings to change a single PIN

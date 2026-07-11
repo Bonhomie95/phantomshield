@@ -32,3 +32,10 @@ export const GOOGLE = {
   webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ?? "",
   iosClientId: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID ?? "",
 };
+
+// Public legal pages — required by both app stores. Override per-environment if
+// your policy lives elsewhere.
+export const LEGAL = {
+  terms:   process.env.EXPO_PUBLIC_TERMS_URL ?? "https://phantomshield.app/terms",
+  privacy: process.env.EXPO_PUBLIC_PRIVACY_URL ?? "https://phantomshield.app/privacy",
+};

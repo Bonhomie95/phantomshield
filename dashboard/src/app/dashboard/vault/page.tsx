@@ -55,10 +55,12 @@ export default function VaultPage() {
               {/* Photo area */}
               <div className="aspect-[3/4] bg-phantom-card flex items-center justify-center relative overflow-hidden">
                 {event.photoUrl ? (
-                  <div className="w-full h-full bg-phantom-card flex items-center justify-center">
-                    {/* In production: <Image src={event.photoUrl} fill className="object-cover" alt="Intruder" /> */}
-                    <span className="text-4xl opacity-30">👤</span>
-                  </div>
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={event.photoUrl}
+                    alt="Intruder snapshot"
+                    className="w-full h-full object-cover"
+                  />
                 ) : (
                   <span className="text-4xl opacity-20">👤</span>
                 )}
