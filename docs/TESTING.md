@@ -21,7 +21,8 @@ Add yourself (secrets are never copied by tooling):
 | Variable | Value |
 |---|---|
 | `MONGODB_URI` | Your Atlas connection string. In Atlas → Network Access, allow `0.0.0.0/0` (Render has no fixed IP on free plans). |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | An IAM user with only `ses:SendEmail`. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` | SES/Mail Manager SMTP credentials — the simplest route, and what the local `.env` uses. Set these **or** the `AWS_*` pair below, not both. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Alternative to SMTP: an IAM user with only `ses:SendEmail`. |
 | `AWS_REGION` | The region your SES identity lives in (currently `eu-central-1` — change if yours differs). |
 | `EMAIL_FROM` | An address on your **verified** SES domain, e.g. `PhantomShield <alerts@yourdomain.com>`. |
 | `EXPO_ACCESS_TOKEN` | expo.dev → Account settings → Access tokens (push notifications). |

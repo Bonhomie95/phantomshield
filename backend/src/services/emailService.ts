@@ -7,26 +7,50 @@
  * the entire free tier, received nothing at all. Email is the channel that
  * still works when the phone is the thing that's missing.
  *
- * Sent through Amazon SES (API v2). Configure:
- *   AWS_REGION             the SES region your identity is verified in
- *   AWS_ACCESS_KEY_ID      an IAM user allowed ses:SendEmail
- *   AWS_SECRET_ACCESS_KEY
- *   EMAIL_FROM             an address on a verified SES identity
- * Without credentials this no-ops loudly, exactly like Sentry.
+ * Two ways out, whichever is configured (SMTP wins when both are):
+ *
+ *   SMTP  — SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_TLS
+ *           (works with SES/Mail Manager SMTP credentials, or any provider)
+ *   SES   — AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+ *           (an IAM user allowed ses:SendEmail)
+ *
+ * EMAIL_FROM (or SMTP_FROM) must be an address the provider has verified.
+ * With neither configured this no-ops loudly, exactly like Sentry.
  */
 import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
+import nodemailer, { type Transporter } from 'nodemailer';
 import { captureError } from '@/config/monitoring';
 
-const FROM = process.env.EMAIL_FROM ?? 'PhantomShield <alerts@phantomshield.app>';
+const FROM = process.env.EMAIL_FROM || process.env.SMTP_FROM || 'PhantomShield <alerts@phantomshield.app>';
 const DASHBOARD_URL = process.env.DASHBOARD_URL ?? 'https://app.phantomshield.app';
 /** Optional SES configuration set, for bounce/complaint tracking. */
 const CONFIGURATION_SET = process.env.SES_CONFIGURATION_SET || undefined;
 
-export const isEmailConfigured = (): boolean =>
+const smtpConfigured = (): boolean =>
+  Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASSWORD);
+
+const sesConfigured = (): boolean =>
   Boolean(process.env.AWS_REGION && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY);
+
+export const isEmailConfigured = (): boolean => smtpConfigured() || sesConfigured();
 
 let ses: SESv2Client | null = null;
 const client = () => (ses ??= new SESv2Client({ region: process.env.AWS_REGION }));
+
+let smtp: Transporter | null = null;
+const transport = (): Transporter =>
+  (smtp ??= nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT ?? 587),
+    // Port 465 is TLS from the first byte; 587 starts plain and upgrades.
+    secure: Number(process.env.SMTP_PORT ?? 587) === 465,
+    requireTLS: process.env.SMTP_TLS !== 'false',
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD },
+  }));
+
+/** Which transport is live — for /ready and the test script. */
+export const emailTransport = (): 'smtp' | 'ses' | 'none' =>
+  smtpConfigured() ? 'smtp' : sesConfigured() ? 'ses' : 'none';
 
 export interface EmailMessage {
   to: string;
@@ -39,6 +63,16 @@ export interface EmailMessage {
 export async function sendEmail(msg: EmailMessage): Promise<boolean> {
   if (!isEmailConfigured()) return false;
   try {
+    if (smtpConfigured()) {
+      await transport().sendMail({
+        from: FROM,
+        to: msg.to,
+        subject: msg.subject,
+        text: msg.text,
+        ...(msg.html ? { html: msg.html } : {}),
+      });
+      return true;
+    }
     await client().send(
       new SendEmailCommand({
         FromEmailAddress: FROM,
