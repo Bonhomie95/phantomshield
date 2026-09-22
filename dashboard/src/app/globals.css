@@ -45,3 +45,8 @@ body {
 }
 
 .status-pulse { animation: statusPulse 2s ease-in-out infinite; }
+
+/* Light OSM tiles, inverted to sit in the dark UI (see DeviceMap). */
+.ps-dark-tiles {
+  filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9) saturate(0.7);
+}

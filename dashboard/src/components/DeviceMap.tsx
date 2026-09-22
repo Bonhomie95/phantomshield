@@ -86,9 +86,14 @@ export function DeviceMap({
         style={{ height: '100%', width: '100%', background: '#0A0E1A' }}
       >
         <TileLayer
-          // Attribution is a licence requirement for both OSM data and CARTO tiles.
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          // Plain OpenStreetMap tiles: no API key, unlike CARTO's dark basemap,
+          // which now stamps "API KEY REQUIRED" across every tile. They are a
+          // light map, so ps-dark-tiles inverts them to match the UI.
+          // ponytail: OSM's tile policy is for light use — move to a paid tile
+          // provider (MapTiler, Carto with a key) if this gets real traffic.
+          className="ps-dark-tiles"
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
         {/* The trail the device actually travelled. */}
