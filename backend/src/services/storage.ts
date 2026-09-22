@@ -1,12 +1,17 @@
 /**
- * Intruder photo storage, in MongoDB.
+ * Intruder photo storage.
  *
  * The device uploads the JPEG to the API (PUT /sync/intruder/:id/photo) and the
  * dashboard reads it back through the authenticated GET on the same path. Every
  * read and write is scoped by the authenticated user id, so there is no key a
  * caller could supply to reach another account's photo.
+ *
+ * The bytes live in Cloudflare R2 when R2_* is configured, and inline in
+ * MongoDB otherwise. Either way one row per photo stays in MongoDB, which is
+ * what the quota counter, the existence check and the TTL work from.
  */
 import { IntruderPhoto } from '@/models';
+import { isR2Configured, r2Put, r2Get, r2Delete } from '@/services/r2';
 import { ENCRYPTED_PHOTO_CONTENT_TYPE, ENCRYPTED_PHOTO_MAGIC } from '@/types';
 
 export { ENCRYPTED_PHOTO_CONTENT_TYPE };
@@ -22,7 +27,7 @@ export function safeEventId(eventId: string): string {
   return eventId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
 }
 
-/** Stable reference recorded on the IntruderEvent row (never used as a lookup key). */
+/** Object key in R2, and the reference recorded on the IntruderEvent row. */
 export function intruderKey(userId: string, eventId: string): string {
   return `intruder/${userId}/${safeEventId(eventId)}.jpg`;
 }
@@ -46,18 +51,30 @@ export async function savePhoto(
   data: Buffer,
   contentType: string = INTRUDER_CONTENT_TYPE,
 ): Promise<void> {
+  const id = safeEventId(eventId);
+  const key = intruderKey(userId, id);
+  // Only claim the photo is stored once the bytes are somewhere. A failed R2
+  // write falls back to MongoDB rather than losing the evidence.
+  const inR2 = isR2Configured() && (await r2Put(key, data, contentType));
   await IntruderPhoto.updateOne(
-    { userId, eventId: safeEventId(eventId) },
-    { $set: { data, size: data.length, contentType } },
+    { userId, eventId: id },
+    inR2
+      ? { $set: { key, size: data.length, contentType }, $unset: { data: 1 } }
+      : { $set: { data, size: data.length, contentType }, $unset: { key: 1 } },
     { upsert: true },
   );
 }
 
 export async function getPhoto(userId: string, eventId: string): Promise<{ data: Buffer; contentType: string } | null> {
   const doc = await IntruderPhoto.findOne({ userId, eventId: safeEventId(eventId) })
-    .select('data contentType')
+    .select('data key contentType')
     .lean();
-  if (!doc?.data) return null;
+  if (!doc) return null;
+  if (doc.key) {
+    const data = await r2Get(doc.key);
+    return data && { data, contentType: doc.contentType ?? INTRUDER_CONTENT_TYPE };
+  }
+  if (!doc.data) return null;
   // lean() yields a BSON Binary, not a Buffer; its bytes live on `.buffer`.
   const raw = doc.data as unknown as Buffer | { buffer: Uint8Array };
   return {
@@ -75,10 +92,26 @@ export async function countPhotosSince(userId: string, since: Date): Promise<num
   return IntruderPhoto.countDocuments({ userId, createdAt: { $gte: since } });
 }
 
+/** Mongo filter over the photo rows (always scoped by userId at the callers). */
+type PhotoFilter = Record<string, unknown>;
+
 /** Delete a user's photos — all of them, or only the listed events. */
 export async function deleteUserPhotos(userId: string, eventIds?: string[]): Promise<number> {
-  const filter: Record<string, unknown> = { userId };
+  const filter: PhotoFilter = { userId };
   if (eventIds) filter.eventId = { $in: eventIds.map(safeEventId) };
+  return deletePhotos(filter);
+}
+
+/**
+ * Delete the rows matching `filter` and the R2 objects they point at.
+ * ponytail: the collection's TTL index expires rows without running this, so
+ * give the bucket a matching 365-day lifecycle rule to sweep those objects.
+ */
+export async function deletePhotos(filter: PhotoFilter): Promise<number> {
+  const keys = (await IntruderPhoto.find({ ...filter, key: { $exists: true } }).select('key').lean())
+    .map((d) => d.key)
+    .filter((k): k is string => !!k);
   const res = await IntruderPhoto.deleteMany(filter);
+  if (keys.length) await r2Delete(keys);
   return res.deletedCount ?? 0;
 }

@@ -21,7 +21,8 @@ const ROW_TTL_DAYS = 365;
 
 /** Trim each active user's events to their plan's history window. */
 export const runRetention = async (): Promise<{ users: number; deleted: number }> => {
-  const { User, ActivityEvent, LocationPing, IntruderEvent, IntruderPhoto } = await import('@/models');
+  const { User, ActivityEvent, LocationPing, IntruderEvent } = await import('@/models');
+  const { deletePhotos } = await import('@/services/storage');
 
   let users = 0;
   let deleted = 0;
@@ -57,9 +58,9 @@ export const runRetention = async (): Promise<{ users: number; deleted: number }
     // Intruder evidence (rows and the photos themselves) honours the window too.
     const [ev, ph] = await Promise.all([
       IntruderEvent.deleteMany({ userId: { $in: userIds }, timestamp: { $lt: cutoff } }),
-      IntruderPhoto.deleteMany({ userId: { $in: userIds }, createdAt: { $lt: cutoff } }),
+      deletePhotos({ userId: { $in: userIds }, createdAt: { $lt: cutoff } }),
     ]);
-    deleted += (ev.deletedCount ?? 0) + (ph.deletedCount ?? 0);
+    deleted += (ev.deletedCount ?? 0) + ph;
   }
 
   return { users, deleted };

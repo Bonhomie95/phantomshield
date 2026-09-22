@@ -262,7 +262,7 @@ refreshes transparently, and enforces an Origin (CSRF) check.
 | More than one API instance | Set `REDIS_URL`: rate-limit counters, presence and WebSocket fan-out are then shared across instances |
 | MongoDB reads | Add read replicas; widen the short overview cache in `config/kv.ts` |
 | Alert delivery | In-process with retry; move to a Mongo-backed job collection for delivery across restarts |
-| Photo storage | Photos live in MongoDB (≤3MB each); move to object storage if volume grows |
+| Photo storage | Photos go to Cloudflare R2 when `R2_*` is set, and stay inline in MongoDB (≤3MB each) otherwise. Give the bucket a 365-day lifecycle rule to match the row TTL |
 | API throughput | Add Railway auto-scaling or deploy to multiple regions |
 
 ---

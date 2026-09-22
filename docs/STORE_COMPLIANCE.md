@@ -25,7 +25,7 @@ collects. Part D is the review notes to paste in.
 | iOS Info.plist | `UIBackgroundModes`: location (+ `processing`/`fetch` added by expo-background-task). `ITSAppUsesNonExemptEncryption=false`. Privacy manifest declares collected data + required-reason APIs. |
 | Security fixes | Tab screens can't be reached by deep link without the biometric/PIN gate; PIN setup can't be opened by deep link; Android Back can't disarm Guard Mode; remote commands are scoped per user **and** device; removed devices lose their sessions; single-flight token refresh (parallel refreshes used to log users out); weak PINs and decoy==real PIN rejected. |
 | Product focus (v1.0) | Activity logging, app-usage logging (`PACKAGE_USAGE_STATS`) and trusted hours were **removed** — the app is anti-theft only, which keeps it clear of both stores' stalkerware/monitoring policies. One app PIN (+ optional decoy) replaced five section PINs; old PINs still unlock once and are migrated. An account is optional. |
-| Backend | Runs on **MongoDB**, with **optional Redis** (`REDIS_URL`) for short-lived state, shared rate limits and multi-instance WebSocket fan-out (no BullMQ/R2). Photos stored in MongoDB, JPEG-only, owner-scoped. Also fixed: the Mongo client required the missing `zstd` module, which would have failed every query against Atlas. |
+| Backend | Runs on **MongoDB**, with **optional Redis** (`REDIS_URL`) for short-lived state, shared rate limits and multi-instance WebSocket fan-out (no BullMQ). Photo bytes go to Cloudflare R2 when `R2_*` is set and to MongoDB otherwise; JPEG-only, owner-scoped, and the object key is always derived server-side from the authenticated user id. Also fixed: the Mongo client required the missing `zstd` module, which would have failed every query against Atlas. |
 
 ---
 
@@ -39,7 +39,6 @@ collects. Part D is the review notes to paste in.
 - [ ] Sign in with Apple key: App Store Connect → Users and Access → Keys → "Sign in with Apple" → download `.p8`. Set `APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY`, `APPLE_BUNDLE_ID=dev.bonhomie95.phantomshield`.
 - [ ] `EXPO_ACCESS_TOKEN`, `REVENUECAT_WEBHOOK_SECRET`, and Amazon SES (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) + `EMAIL_FROM` on a verified SES identity.
 - [ ] `FRONTEND_URL` / `DASHBOARD_URL` = your dashboard origin (CORS + email links).
-- [ ] Your `backend/.env` still lists removed variables (`REDIS_URL`, `R2_*`, `MASTER_ENCRYPTION_KEY`, `JWT_REFRESH_SECRET`, `TOTP_APP_NAME`); they're ignored — delete them.
 - [ ] Run **one** API instance for now (rate-limit counters and live sockets are per-instance; see README → Scaling).
 
 ### 2. Dashboard (hosts the privacy/terms/support/deletion pages the stores link to)

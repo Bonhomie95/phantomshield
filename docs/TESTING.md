@@ -25,6 +25,7 @@ Add yourself (secrets are never copied by tooling):
 | `AWS_REGION` | The region your SES identity lives in (currently `eu-central-1` — change if yours differs). |
 | `EMAIL_FROM` | An address on your **verified** SES domain, e.g. `PhantomShield <alerts@yourdomain.com>`. |
 | `EXPO_ACCESS_TOKEN` | expo.dev → Account settings → Access tokens (push notifications). |
+| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | Cloudflare R2 bucket for intruder photos. Leave blank to keep photos inside MongoDB (fine for testing, but the Atlas free tier is only 512MB). Give the bucket a 365-day lifecycle rule. |
 | `REVENUECAT_WEBHOOK_SECRET` | Only once subscriptions are live. |
 
 Check email works: Render → phantomshield-api → Shell →

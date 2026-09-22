@@ -376,15 +376,19 @@ export const GuardSessionCount = mongoose.model<IGuardSessionCount>(
 );
 
 // ─── IntruderPhoto ────────────────────────────────────────────────────────────
-// The photo bytes themselves. Stored in MongoDB (not object storage) so the
-// whole service runs on one database. A downscaled JPEG is ~100–300KB, far
-// under the 16MB document limit; the route caps uploads at 3MB.
+// One row per stored photo. The bytes go to Cloudflare R2 when it is
+// configured (the row then carries only `key`), otherwise they stay inline in
+// `data` so the whole service can run on one database. A downscaled JPEG is
+// ~100–300KB, far under the 16MB document limit; the route caps uploads at 3MB.
 
 export interface IIntruderPhoto extends Document {
   _id:         Types.ObjectId;
   userId:      Types.ObjectId;
   eventId:     string;
-  data:        Buffer;
+  /** Bytes, when they live in MongoDB. Absent once R2 holds them. */
+  data?:       Buffer;
+  /** R2 object key, when the bytes live in R2 instead. */
+  key?:        string;
   contentType: string;
   size:        number;
   createdAt:   Date;
@@ -394,7 +398,8 @@ const IntruderPhotoSchema = new Schema<IIntruderPhoto>(
   {
     userId:      { type: Schema.Types.ObjectId, ref: 'User', required: true },
     eventId:     { type: String, required: true },
-    data:        { type: Buffer, required: true },
+    data:        { type: Buffer },
+    key:         { type: String },
     contentType: { type: String, default: 'image/jpeg' },
     size:        { type: Number, required: true },
   },
