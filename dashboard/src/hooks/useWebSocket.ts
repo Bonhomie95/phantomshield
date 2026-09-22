@@ -3,7 +3,10 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { getDeviceId } from '@/lib/deviceId';
 import type { WSMessage } from '@phantomshield/shared';
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3002/ws';
+// The endpoint is /ws. An origin-only NEXT_PUBLIC_WS_URL is the easy mistake
+// to make when configuring a deployment, and it fails as a silent reconnect
+// loop, so add the path rather than trusting it to be there.
+const WS_URL = (process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3002').replace(/\/+$/, '').replace(/(\/ws)?$/, '/ws');
 
 // Re-export the shared wire type so consumers keep a single source of truth.
 export type WSEvent = WSMessage;
