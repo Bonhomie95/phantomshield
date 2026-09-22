@@ -34,7 +34,10 @@ const request = async <T>(path: string, options: RequestInit = {}): Promise<T> =
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: 'Unknown error' }));
-    throw new ApiError(res.status, body.error ?? body.message ?? 'Request failed');
+    // `message` is the sentence written for a person ("Remote lock requires a
+    // paid plan."); `error` is the short code ("Upgrade required"). Show the
+    // sentence when there is one — it is what the toast puts in front of them.
+    throw new ApiError(res.status, body.message ?? body.error ?? 'Request failed');
   }
 
   if (res.status === 204) return undefined as T;

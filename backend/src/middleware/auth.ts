@@ -82,6 +82,11 @@ async function touchDeviceLastSeen(deviceId: string, userId: string): Promise<vo
 
 // ─── Plan Guard ───────────────────────────────────────────────────────────────
 
+// Where a blocked caller is told to go. The phone pays through the store, so
+// this points at the dashboard that the deployment actually runs on.
+const upgradeUrl = (): string =>
+  `${(process.env.DASHBOARD_URL ?? 'https://app.phantomshield.app').replace(/\/+$/, '')}/dashboard/settings`;
+
 export const requirePlan = (...allowedPlans: PlanId[]) =>
   async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const user = request.user as JWTPayload;
@@ -91,7 +96,7 @@ export const requirePlan = (...allowedPlans: PlanId[]) =>
         message: `This feature requires: ${allowedPlans.join(' or ')} plan.`,
         requiredPlans: allowedPlans,
         currentPlan: user.plan,
-        upgradeUrl: 'https://phantomshield.app/upgrade',
+        upgradeUrl: upgradeUrl(),
       });
     }
   };
@@ -116,7 +121,7 @@ export const requireCapability = (
         message: `${label} requires a paid plan.`,
         capability,
         currentPlan: user.plan,
-        upgradeUrl: 'https://phantomshield.app/upgrade',
+        upgradeUrl: upgradeUrl(),
       });
     }
   };

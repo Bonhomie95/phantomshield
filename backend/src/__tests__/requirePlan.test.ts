@@ -32,6 +32,7 @@ describe('requirePlan middleware', () => {
     const body = send.mock.calls[0][0] as { currentPlan: string; requiredPlans: string[]; upgradeUrl?: string };
     expect(body.currentPlan).toBe('free');
     expect(body.requiredPlans).toEqual(['starter', 'pro']);
-    expect(body.upgradeUrl).toContain('upgrade');
+    // Somewhere on the deployment's own dashboard, never a hard-coded domain.
+    expect(body.upgradeUrl).toContain(process.env.DASHBOARD_URL ?? 'phantomshield');
   });
 });
