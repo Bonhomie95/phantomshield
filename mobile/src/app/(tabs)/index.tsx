@@ -1,169 +1,227 @@
-import React from 'react';
-import {
-  View,
-  Text,
-  ScrollView,
-  StyleSheet,
-  TouchableOpacity,
-  Switch,
-} from 'react-native';
-import { router } from 'expo-router';
+import React, { useCallback, useEffect, useState } from 'react';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Platform, Image } from 'react-native';
+import { router, useFocusEffect } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { usePhantomStore } from '@/stores/phantom';
 import { ShieldLogo } from '@/components/ShieldLogo';
-import { ActivityCard } from '@/components/ActivityCard';
 import { Colors, Spacing, FontSize, Radius } from '@/constants/theme';
+import { GuardMode } from '@/constants/types';
+import { armHref } from '@/services/shortcuts';
+import { isPocketModeAvailable, GUARD_MODE_SUMMARY } from '@/services/guard';
+import { listGuardians } from '@/services/api';
+
+type IconName = React.ComponentProps<typeof Ionicons>['name'];
+
+const MODE_ICON: Record<GuardMode, IconName> = {
+  table: 'phone-portrait-outline',
+  charger: 'flash-outline',
+  pocket: 'walk-outline',
+};
 
 export default function HomeScreen() {
   const {
     user,
-    trackingEnabled,
-    setTrackingEnabled,
-    recentActivity,
+    isAuthenticated,
+    intruderSnapshotEnabled,
+    locationTrackingEnabled,
+    e2eEnabled,
     intruderPhotos,
-    unlockedLayers,
+    guardEvents,
   } = usePhantomStore();
+  const [pocket, setPocket] = useState(false);
+  const [guardianCount, setGuardianCount] = useState<number | null>(null);
 
-  const anomalies = recentActivity.filter((e) => e.isAnomaly);
-  const recentThree = recentActivity.slice(0, 3);
+  useEffect(() => { void isPocketModeAvailable().then(setPocket); }, []);
 
-  const todayStr = new Date().toDateString();
-  const totalTodaySec = recentActivity
-    .filter((e) => new Date(e.openedAt).toDateString() === todayStr)
-    .reduce((sum, e) => sum + e.durationSec, 0);
+  useFocusEffect(
+    useCallback(() => {
+      if (!isAuthenticated) return;
+      void listGuardians().then((r) => r && setGuardianCount(r.guardians.length));
+    }, [isAuthenticated]),
+  );
+
+  const modes: GuardMode[] = pocket ? ['table', 'charger', 'pocket'] : ['table', 'charger'];
+
+  const checks: { key: string; label: string; on: boolean; detail: string; icon: IconName; go: () => void }[] = [
+    {
+      key: 'account',
+      label: 'Cloud backup',
+      on: isAuthenticated,
+      detail: isAuthenticated ? 'Evidence reaches your account' : 'Sign in so evidence survives a stolen phone',
+      icon: 'cloud-upload-outline',
+      go: () => (isAuthenticated ? router.push('/(tabs)/settings') : router.push('/(auth)/welcome')),
+    },
+    {
+      key: 'photos',
+      label: 'Intruder photos',
+      on: intruderSnapshotEnabled,
+      detail: intruderSnapshotEnabled ? 'Photo on a wrong PIN or Guard Mode trigger' : 'Off',
+      icon: 'camera-outline',
+      go: () => router.push('/(tabs)/settings'),
+    },
+    {
+      key: 'find',
+      label: 'Find My Phone',
+      on: isAuthenticated && locationTrackingEnabled,
+      detail: locationTrackingEnabled ? 'Location trail on the web dashboard' : 'Off',
+      icon: 'navigate-outline',
+      go: () => router.push('/(tabs)/settings'),
+    },
+    {
+      key: 'guardians',
+      label: 'Guardians',
+      on: isAuthenticated && (guardianCount ?? 0) > 0,
+      detail:
+        guardianCount && isAuthenticated
+          ? `${guardianCount} ${guardianCount === 1 ? 'person' : 'people'} alerted if it's stolen`
+          : 'Someone who gets a live location link if it’s stolen',
+      icon: 'people-outline',
+      go: () => router.push('/guardians'),
+    },
+    {
+      key: 'e2e',
+      label: 'Private photo backup',
+      on: isAuthenticated && e2eEnabled,
+      detail: e2eEnabled ? 'End-to-end encrypted' : 'Encrypt photos so only you can see them',
+      icon: 'key-outline',
+      go: () => router.push('/encryption'),
+    },
+  ];
+  const onCount = checks.filter((c) => c.on).length;
+
+  const recent = [...intruderPhotos.map((p) => ({ id: p.id, at: p.timestamp, text: p.anomalyReason ?? 'Intruder photo', uri: p.imageUri as string | undefined })),
+    ...guardEvents.filter((g) => !g.imageUri).map((g) => ({ id: g.id, at: g.timestamp, text: g.reason, uri: undefined }))]
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    .slice(0, 3);
 
   return (
-    <ScrollView
-      style={s.scroll}
-      contentContainerStyle={s.container}
-      showsVerticalScrollIndicator={false}
-    >
+    <ScrollView style={s.scroll} contentContainerStyle={s.container} showsVerticalScrollIndicator={false}>
       {/* ── Header ── */}
       <View style={s.header}>
         <View style={s.headerLeft}>
           <ShieldLogo size={32} />
           <View>
             <Text style={s.brand}>PhantomShield</Text>
-            <Text style={s.email}>{user?.email ?? 'Your device'}</Text>
+            <Text style={s.email} numberOfLines={1}>{isAuthenticated ? user?.email ?? 'Signed in' : 'On this phone only'}</Text>
           </View>
         </View>
-        <View style={[s.planBadge, user?.plan === 'elite' && s.planBadgeElite]}>
-          <Text style={[s.planText, user?.plan === 'elite' && { color: Colors.accent }]}>
-            {user?.plan?.toUpperCase() ?? 'FREE'}
-          </Text>
-        </View>
-      </View>
-
-      {/* ── Guard Mode — anti-theft alarm (hero action) ── */}
-      <TouchableOpacity
-        style={s.guardCard}
-        activeOpacity={0.85}
-        onPress={() => router.push('/guard-mode')}
-      >
-        <Text style={s.guardIcon}>🛡</Text>
-        <View style={{ flex: 1 }}>
-          <Text style={s.guardTitle}>Arm Guard Mode</Text>
-          <Text style={s.guardSub}>Sound an alarm + snap a photo if anyone moves your phone.</Text>
-        </View>
-        <Text style={s.guardArrow}>›</Text>
-      </TouchableOpacity>
-
-      {/* ── Tracking toggle ── */}
-      <View style={[s.card, s.statusCard, trackingEnabled && s.statusCardActive]}>
-        <View style={s.statusLeft}>
-          <View style={[s.statusDot, { backgroundColor: trackingEnabled ? Colors.success : Colors.textMuted }]} />
-          <View>
-            <Text style={s.statusTitle}>
-              {trackingEnabled ? 'Monitoring Active' : 'Monitoring Paused'}
-            </Text>
-            <Text style={s.statusSub}>
-              {trackingEnabled
-                ? 'PhantomShield is watching your activity'
-                : 'Enable to start tracking'}
+        {isAuthenticated && (
+          <View style={[s.planBadge, user?.plan === 'pro' && s.planBadgePro]}>
+            <Text style={[s.planText, user?.plan === 'pro' && { color: Colors.accent }]}>
+              {user?.plan?.toUpperCase() ?? 'FREE'}
             </Text>
           </View>
-        </View>
-        <Switch
-          value={trackingEnabled}
-          onValueChange={setTrackingEnabled}
-          trackColor={{ false: Colors.bgBorder, true: Colors.primary + '55' }}
-          thumbColor={trackingEnabled ? Colors.primary : Colors.textMuted}
-        />
-      </View>
-
-      {/* ── Stats ── */}
-      <View style={s.statsRow}>
-        <View style={s.card}>
-          <Text style={s.statValue}>{Math.round(totalTodaySec / 60)}m</Text>
-          <Text style={s.statLabel}>Today's Usage</Text>
-        </View>
-        <View style={[s.card, anomalies.length > 0 && s.statCardAlert]}>
-          <Text style={[s.statValue, anomalies.length > 0 && { color: Colors.accent }]}>
-            {anomalies.length}
-          </Text>
-          <Text style={s.statLabel}>Anomalies</Text>
-        </View>
-        <View style={s.card}>
-          <Text style={s.statValue}>{intruderPhotos.length}</Text>
-          <Text style={s.statLabel}>Intruder Shots</Text>
-        </View>
-      </View>
-
-      {/* ── Anomaly alert banner ── */}
-      {anomalies.length > 0 && (
-        <TouchableOpacity
-          onPress={() => router.push('/(tabs)/activity')}
-          activeOpacity={0.8}
-          style={[s.card, s.alertBanner]}
-        >
-          <Text style={s.alertIcon}>⚠️</Text>
-          <View style={{ flex: 1 }}>
-            <Text style={s.alertTitle}>{anomalies.length} anomal{anomalies.length === 1 ? 'y' : 'ies'} detected</Text>
-            <Text style={s.alertSub} numberOfLines={1}>{anomalies[0].anomalyReason}</Text>
-          </View>
-          <Text style={s.alertArrow}>›</Text>
-        </TouchableOpacity>
-      )}
-
-      {/* ── Recent activity ── */}
-      <View style={s.section}>
-        <View style={s.sectionHeader}>
-          <Text style={s.sectionLabel}>RECENT ACTIVITY</Text>
-          <TouchableOpacity onPress={() => router.push('/(tabs)/activity')}>
-            <Text style={s.sectionAction}>View All</Text>
-          </TouchableOpacity>
-        </View>
-        {recentThree.length === 0 ? (
-          <View style={[s.card, s.emptyCard]}>
-            <Text style={s.emptyText}>No activity recorded yet</Text>
-          </View>
-        ) : (
-          recentThree.map((event) => (
-            <ActivityCard key={event.id} event={event} />
-          ))
         )}
       </View>
 
-      {/* ── Quick actions ── */}
-      <View style={s.section}>
-        <Text style={s.sectionLabel}>QUICK ACTIONS</Text>
-        <View style={s.quickGrid}>
-          {[
-            { icon: '📸', label: 'Intruder\nPhotos',    dest: '/(tabs)/vault' },
-            { icon: '🔒', label: 'Secure\nVault',       dest: '/(tabs)/vault' },
-            { icon: '📊', label: 'Full\nActivity',      dest: '/(tabs)/activity' },
-            { icon: '⚙️',  label: 'Settings',           dest: '/(tabs)/settings' },
-          ].map((a) => (
+      {/* ── Guard Mode (hero) ── */}
+      <View style={s.hero}>
+        <TouchableOpacity
+          style={s.heroTop}
+          activeOpacity={0.85}
+          onPress={() => router.push('/guard-mode')}
+          accessibilityRole="button"
+          accessibilityLabel="Open Guard Mode"
+        >
+          <View style={s.heroIcon}>
+            <Ionicons name="shield-half-outline" size={30} color={Colors.primary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={s.heroTitle}>Guard Mode</Text>
+            <Text style={s.heroSub}>Leaving your phone for a moment? Arm it — you’ll know if anyone touches it.</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color={Colors.primary} />
+        </TouchableOpacity>
+        <View style={s.modeRow}>
+          {modes.map((m) => (
             <TouchableOpacity
-              key={a.label}
-              onPress={() => router.push(a.dest as any)}
-              style={s.quickCard}
-              activeOpacity={0.7}
+              key={m}
+              style={s.modeChip}
+              activeOpacity={0.8}
+              onPress={() => router.push(armHref(m) as never)}
+              accessibilityRole="button"
+              accessibilityLabel={`Arm now: ${GUARD_MODE_SUMMARY[m].title}`}
             >
-              <Text style={s.quickIcon}>{a.icon}</Text>
-              <Text style={s.quickLabel}>{a.label}</Text>
+              <Ionicons name={MODE_ICON[m]} size={18} color={Colors.textPrimary} />
+              <Text style={s.modeText} numberOfLines={1}>{GUARD_MODE_SUMMARY[m].title}</Text>
             </TouchableOpacity>
           ))}
         </View>
+      </View>
+
+      {/* ── Protection checklist ── */}
+      <View style={s.section}>
+        <View style={s.sectionHeader}>
+          <Text style={s.sectionLabel}>YOUR PROTECTION</Text>
+          <Text style={s.score}>{onCount} of {checks.length} on</Text>
+        </View>
+        <View style={s.card}>
+          {checks.map((c, i) => (
+            <TouchableOpacity
+              key={c.key}
+              style={[s.checkRow, i > 0 && s.checkDivider]}
+              onPress={c.go}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`${c.label}: ${c.on ? 'on' : 'off'}. ${c.detail}`}
+            >
+              <Ionicons name={c.icon} size={20} color={c.on ? Colors.success : Colors.textMuted} />
+              <View style={{ flex: 1 }}>
+                <Text style={s.checkLabel}>{c.label}</Text>
+                <Text style={s.checkDetail} numberOfLines={2}>{c.detail}</Text>
+              </View>
+              <Ionicons
+                name={c.on ? 'checkmark-circle' : 'add-circle-outline'}
+                size={22}
+                color={c.on ? Colors.success : Colors.primary}
+              />
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
+      {/* ── Recent evidence ── */}
+      <View style={s.section}>
+        <View style={s.sectionHeader}>
+          <Text style={s.sectionLabel}>RECENT EVENTS</Text>
+          <TouchableOpacity onPress={() => router.push('/(tabs)/vault')} accessibilityRole="button">
+            <Text style={s.sectionAction}>See all</Text>
+          </TouchableOpacity>
+        </View>
+        {recent.length === 0 ? (
+          <View style={[s.card, s.emptyCard]}>
+            <Ionicons name="checkmark-done-outline" size={26} color={Colors.success} />
+            <Text style={s.emptyText}>Nothing has happened. When something does, it shows up here.</Text>
+          </View>
+        ) : (
+          <View style={s.card}>
+            {recent.map((r, i) => (
+              <View key={r.id} style={[s.eventRow, i > 0 && s.checkDivider]}>
+                {r.uri ? (
+                  <Image source={{ uri: r.uri }} style={s.eventThumb} />
+                ) : (
+                  <View style={[s.eventThumb, s.eventThumbEmpty]}>
+                    <Ionicons name="alert-circle-outline" size={20} color={Colors.accent} />
+                  </View>
+                )}
+                <View style={{ flex: 1 }}>
+                  <Text style={s.checkLabel} numberOfLines={1}>{r.text}</Text>
+                  <Text style={s.checkDetail}>{new Date(r.at).toLocaleString()}</Text>
+                </View>
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+
+      {/* ── Arm from anywhere ── */}
+      <View style={[s.card, s.tip]}>
+        <Ionicons name="flash-outline" size={18} color={Colors.primary} />
+        <Text style={s.tipText}>
+          {Platform.OS === 'ios'
+            ? 'Arm in one step: long-press the PhantomShield icon, say “Arm PhantomShield” to Siri, or add it to the Action Button in Settings.'
+            : 'Arm in one step: long-press the PhantomShield icon on your home screen.'}
+        </Text>
       </View>
     </ScrollView>
   );
@@ -173,88 +231,58 @@ const s = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: Colors.bg },
   container: { padding: Spacing.lg, paddingTop: 60, paddingBottom: 32, gap: Spacing.md },
 
-  // Header
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
   brand: { fontSize: FontSize.lg, fontWeight: '700', color: Colors.textPrimary },
   email: { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 1 },
   planBadge: {
-    paddingHorizontal: 8, paddingVertical: 3,
-    borderRadius: Radius.full,
-    backgroundColor: Colors.primaryGlow,
-    borderWidth: 1, borderColor: Colors.primary + '44',
+    paddingHorizontal: 8, paddingVertical: 3, borderRadius: Radius.full,
+    backgroundColor: Colors.primaryGlow, borderWidth: 1, borderColor: Colors.primary + '44',
   },
-  planBadgeElite: { backgroundColor: Colors.accentGlow, borderColor: Colors.accent + '44' },
+  planBadgePro: { backgroundColor: Colors.accentGlow, borderColor: Colors.accent + '44' },
   planText: { fontSize: 10, fontWeight: '700', letterSpacing: 0.8, color: Colors.primary },
 
-  // Card base
   card: {
-    backgroundColor: Colors.bgCard,
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    borderColor: Colors.bgBorder,
-    padding: Spacing.md,
+    backgroundColor: Colors.bgCard, borderRadius: Radius.lg,
+    borderWidth: 1, borderColor: Colors.bgBorder, padding: Spacing.md,
   },
 
-  // Guard Mode hero card
-  guardCard: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    backgroundColor: Colors.primaryGlow,
-    borderRadius: Radius.lg, borderWidth: 1, borderColor: Colors.primary + '55',
-    padding: Spacing.md,
+  hero: {
+    backgroundColor: Colors.primaryGlow, borderRadius: Radius.lg,
+    borderWidth: 1, borderColor: Colors.primary + '55', padding: Spacing.md, gap: Spacing.md,
   },
-  guardIcon: { fontSize: 30 },
-  guardTitle: { fontSize: FontSize.md, fontWeight: '800', color: Colors.primary },
-  guardSub: { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 2, lineHeight: 16 },
-  guardArrow: { fontSize: 24, color: Colors.primary },
-
-  // Status
-  statusCard: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  statusCardActive: { borderColor: Colors.primary + '44' },
-  statusLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
-  statusDot: { width: 8, height: 8, borderRadius: 4 },
-  statusTitle: { fontSize: FontSize.md, fontWeight: '600', color: Colors.textPrimary },
-  statusSub: { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 2 },
-
-  // Stats row
-  statsRow: { flexDirection: 'row', gap: 10 },
-  statValue: { fontSize: FontSize.xxl, fontWeight: '700', color: Colors.primary, textAlign: 'center' },
-  statLabel: { fontSize: 10, color: Colors.textSecondary, textAlign: 'center', marginTop: 3 },
-  statCardAlert: { borderColor: Colors.accent + '55' },
-
-  // Alert banner
-  alertBanner: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    borderColor: Colors.accent + '55',
-    backgroundColor: Colors.accentGlow,
+  heroTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  heroIcon: {
+    width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: Colors.bg, borderWidth: 1, borderColor: Colors.primary + '55',
   },
-  alertIcon: { fontSize: 20 },
-  alertTitle: { fontSize: FontSize.sm, fontWeight: '700', color: Colors.accent },
-  alertSub: { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 1 },
-  alertArrow: { fontSize: 22, color: Colors.textMuted },
+  heroTitle: { fontSize: FontSize.lg, fontWeight: '800', color: Colors.primary },
+  heroSub: { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 2, lineHeight: 17 },
+  modeRow: { flexDirection: 'row', gap: 8 },
+  modeChip: {
+    flex: 1, minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    backgroundColor: Colors.bgCard, borderRadius: Radius.md, borderWidth: 1, borderColor: Colors.bgBorder,
+    paddingHorizontal: 8, paddingVertical: 10,
+  },
+  modeText: { fontSize: FontSize.xs, fontWeight: '700', color: Colors.textPrimary, flexShrink: 1 },
 
-  // Sections
   section: { gap: 8 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  sectionLabel: {
-    fontSize: 10, fontWeight: '700', color: Colors.textMuted,
-    letterSpacing: 1.2, textTransform: 'uppercase',
-  },
+  sectionLabel: { fontSize: 10, fontWeight: '700', color: Colors.textMuted, letterSpacing: 1.2 },
   sectionAction: { fontSize: FontSize.sm, color: Colors.primary, fontWeight: '600' },
-  emptyCard: { alignItems: 'center', paddingVertical: Spacing.xl },
-  emptyText: { fontSize: FontSize.sm, color: Colors.textMuted },
+  score: { fontSize: FontSize.xs, color: Colors.textSecondary, fontWeight: '600' },
 
-  // Quick actions
-  quickGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  quickCard: {
-    width: '47%',
-    backgroundColor: Colors.bgCard,
-    borderRadius: Radius.lg,
-    borderWidth: 1, borderColor: Colors.bgBorder,
-    padding: Spacing.md,
-    alignItems: 'center',
-    gap: 8,
-  },
-  quickIcon: { fontSize: 22 },
-  quickLabel: { fontSize: FontSize.xs, color: Colors.textSecondary, textAlign: 'center', fontWeight: '500' },
+  checkRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, minHeight: 48 },
+  checkDivider: { borderTopWidth: 1, borderTopColor: Colors.bgBorder },
+  checkLabel: { fontSize: FontSize.md, fontWeight: '600', color: Colors.textPrimary },
+  checkDetail: { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 2 },
+
+  emptyCard: { alignItems: 'center', gap: 8, paddingVertical: Spacing.lg },
+  emptyText: { fontSize: FontSize.sm, color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 },
+  eventRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8 },
+  eventThumb: { width: 44, height: 44, borderRadius: Radius.sm, backgroundColor: Colors.bgBorder },
+  eventThumbEmpty: { alignItems: 'center', justifyContent: 'center' },
+
+  tip: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
+  tipText: { flex: 1, fontSize: FontSize.xs, color: Colors.textSecondary, lineHeight: 18 },
 });

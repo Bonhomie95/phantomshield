@@ -22,6 +22,12 @@ interface PinPadProps {
    */
   verify?: (pin: string) => boolean | Promise<boolean>;
   maxAttempts?: number;
+  /**
+   * Namespaces the persisted brute-force lockout. Different gates should pass
+   * different contexts (e.g. 'guard' for the Guard-stop pad) so a lockout on one
+   * gate doesn't lock the others. Omit for the shared app-gate counter.
+   */
+  lockContext?: string;
   onSuccess: (pin: string) => void;
   onFail?: (attempts: number) => void;
 }
@@ -34,10 +40,17 @@ export function PinPad({
   mode = 'verify',
   verify,
   maxAttempts = 10,
+  lockContext,
   onSuccess,
   onFail,
 }: PinPadProps) {
-  const [pin, setPin]         = useState('');
+  const [pin, setPinState]    = useState('');
+  // Source of truth for the digits typed so far. Fast typing fires several
+  // presses before React re-renders; building from the rendered `pin` dropped
+  // digits. The ref always holds the latest value.
+  const pinRef = useRef('');
+  const busyRef = useRef(false);
+  const setPin = (v: string) => { pinRef.current = v; setPinState(v); };
   const [attempts, setAttempts] = useState(0);
   const [locked, setLocked]   = useState(false);
   const [lockSecs, setLockSecs] = useState(0);
@@ -48,7 +61,7 @@ export function PinPad({
   useEffect(() => {
     if (mode !== 'verify') return;
     (async () => {
-      const st = await pinVault.getLockState();
+      const st = await pinVault.getLockState(lockContext);
       setAttempts(st.attempts);
       const remaining = Math.ceil((st.lockedUntil - Date.now()) / 1000);
       if (remaining > 0) startLockoutUntil(st.lockedUntil);
@@ -85,46 +98,52 @@ export function PinPad({
   };
 
   const handleKey = (key: string) => {
-    if (locked) return;
+    if (locked || busyRef.current) return;
 
     if (key === '⌫') {
-      setPin((p) => p.slice(0, -1));
+      setPin(pinRef.current.slice(0, -1));
       return;
     }
     if (key === '') return;
 
-    const next = pin + key;
+    const next = pinRef.current + key;
     if (next.length > 4) return;
 
     setPin(next);
 
     if (next.length === 4) {
+      // Ignore further presses until this PIN has been checked.
+      busyRef.current = true;
       setTimeout(async () => {
-        if (mode === 'set') {
-          // In 'set' mode any 4-digit PIN is accepted
-          onSuccess(next);
-          setPin('');
-          return;
-        }
+        try {
+          if (mode === 'set') {
+            // In 'set' mode any 4-digit PIN is accepted
+            onSuccess(next);
+            setPin('');
+            return;
+          }
 
-        // In 'verify' mode delegate to the async verify callback.
-        // No callback → treat as "no PIN configured" and pass through.
-        const accepted = verify ? await Promise.resolve(verify(next)) : true;
+          // In 'verify' mode delegate to the async verify callback.
+          // No callback → treat as "no PIN configured" and pass through.
+          const accepted = verify ? await Promise.resolve(verify(next)) : true;
 
-        if (accepted) {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          await pinVault.resetAttempts();
-          onSuccess(next);
-          setPin('');
-        } else {
-          shake();
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-          setPin('');
-          // Persist the failure so the lockout survives an app relaunch.
-          const st = await pinVault.registerFailedAttempt();
-          setAttempts(st.attempts);
-          onFail?.(st.attempts);
-          if (st.lockedUntil > Date.now()) startLockoutUntil(st.lockedUntil);
+          if (accepted) {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            await pinVault.resetAttempts(lockContext);
+            onSuccess(next);
+            setPin('');
+          } else {
+            shake();
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+            setPin('');
+            // Persist the failure so the lockout survives an app relaunch.
+            const st = await pinVault.registerFailedAttempt(lockContext);
+            setAttempts(st.attempts);
+            onFail?.(st.attempts);
+            if (st.lockedUntil > Date.now()) startLockoutUntil(st.lockedUntil);
+          }
+        } finally {
+          busyRef.current = false;
         }
       }, 80);
     }
@@ -140,7 +159,11 @@ export function PinPad({
       {subtitle ? <Text style={s.subtitle}>{subtitle}</Text> : null}
 
       {/* PIN dots */}
-      <Animated.View style={[s.dotsRow, { transform: [{ translateX: shakeAnim }] }]}>
+      <Animated.View
+        style={[s.dotsRow, { transform: [{ translateX: shakeAnim }] }]}
+        accessibilityRole="text"
+        accessibilityLabel={`${pin.length} of 4 digits entered`}
+      >
         {dots.map((d, i) => (
           <View key={i} style={[s.pinDot, d.filled && s.pinDotFilled]} />
         ))}
@@ -153,7 +176,7 @@ export function PinPad({
       )}
 
       {/* Keypad */}
-      <View style={s.keypad}>
+      <View style={s.keypad} accessibilityRole="keyboardkey">
         {KEYS.map((key, i) => (
           <TouchableOpacity
             key={i}
@@ -161,6 +184,10 @@ export function PinPad({
             onPress={() => handleKey(key)}
             disabled={key === '' || locked}
             activeOpacity={key ? 0.6 : 1}
+            accessibilityRole={key ? 'button' : 'none'}
+            accessibilityLabel={key === '⌫' ? 'Delete' : key ? `Digit ${key}` : undefined}
+            accessibilityState={{ disabled: key === '' || locked }}
+            importantForAccessibility={key ? 'yes' : 'no-hide-descendants'}
           >
             <Text style={[s.keyText, key === '⌫' && s.backspace]}>{key}</Text>
           </TouchableOpacity>

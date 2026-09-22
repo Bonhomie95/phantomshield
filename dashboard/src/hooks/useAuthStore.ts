@@ -1,54 +1,60 @@
 import { create } from 'zustand';
-import Cookies from 'js-cookie';
 import { api, UserProfile } from '@/lib/api';
+import { getDeviceId } from '@/lib/deviceId';
+import { identifyWeb, trackWeb } from '@/lib/analytics';
 
 interface AuthStore {
   user: UserProfile | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  /** Exchange a Google ID token (from Google Identity Services) for our session. */
-  loginWithGoogle: (idToken: string) => Promise<void>;
+  /** Exchange a Google or Apple ID token for our session. */
+  loginWithGoogle: (idToken: string, provider?: 'google' | 'apple') => Promise<void>;
   logout: () => Promise<void>;
   loadUser: () => Promise<void>;
 }
 
-// Access token lives ~15 min, refresh token 7 days. Not httpOnly because they
-// are set from client JS; see the security notes in the README for the planned
-// migration to httpOnly cookies set by a Next.js route handler.
-const COOKIE_OPTS = {
-  secure: typeof window !== 'undefined' && window.location.protocol === 'https:',
-  sameSite: 'strict' as const,
-};
-
+// Tokens are now httpOnly cookies set by the BFF route handlers — never touched
+// by client JS. The store only tracks the user profile + auth flag.
 export const useAuthStore = create<AuthStore>((set) => ({
   user: null,
   isLoading: true,
   isAuthenticated: false,
 
-  loginWithGoogle: async (idToken) => {
-    const data = await api.auth.oauth(idToken);
-    Cookies.set('ps_access_token',  data.accessToken,  { ...COOKIE_OPTS, expires: 1 / 96 }); // 15 min
-    Cookies.set('ps_refresh_token', data.refreshToken, { ...COOKIE_OPTS, expires: 7 });       // 7 days
+  loginWithGoogle: async (idToken, provider = 'google') => {
+    const data = await api.auth.oauth(idToken, provider); // BFF sets the httpOnly cookies
+    if (data.user?._id) {
+      identifyWeb(data.user._id, { plan: data.user.plan, provider: data.user.provider });
+      trackWeb('dashboard_signed_in', { plan: data.user.plan });
+    }
     set({ user: data.user, isAuthenticated: true, isLoading: false });
   },
 
   logout: async () => {
-    const refresh = Cookies.get('ps_refresh_token');
-    if (refresh) await api.auth.logout(refresh).catch(() => {});
-    Cookies.remove('ps_access_token');
-    Cookies.remove('ps_refresh_token');
+    await api.auth.logout().catch(() => {});
     set({ user: null, isAuthenticated: false });
     window.location.href = '/auth/login';
   },
 
   loadUser: async () => {
-    const token = Cookies.get('ps_access_token');
-    if (!token) { set({ isLoading: false }); return; }
+    // Silent session check — a 401 just means "not signed in" (no redirect).
     try {
-      const { user } = await api.dashboard.me();
+      const res = await fetch('/api/backend/dashboard/me', {
+        credentials: 'include',
+        headers: { 'X-Device-Id': getDeviceId() },
+      });
+      if (!res.ok) {
+        set({ isLoading: false });
+        return;
+      }
+      const { user } = await res.json();
+      // Same distinct_id as the mobile client (the backend user id), so one
+      // person's web and mobile behaviour resolve to a single identity.
+      if (user?._id) {
+        identifyWeb(user._id, { plan: user.plan, provider: user.provider });
+        trackWeb('dashboard_session', { plan: user.plan });
+      }
       set({ user, isAuthenticated: true, isLoading: false });
     } catch {
-      Cookies.remove('ps_access_token');
       set({ isLoading: false });
     }
   },

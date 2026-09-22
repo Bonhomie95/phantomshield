@@ -1,16 +1,22 @@
 import { FastifyPluginAsync } from 'fastify';
-import { Types } from 'mongoose';
-import { authenticate, requirePlan } from '@/middleware/auth';
-import { ActivityEvent, IntruderEvent, Device, User, RefreshToken } from '@/models';
+import { authenticate } from '@/middleware/auth';
+import {
+  ActivityEvent, IntruderEvent, Device, User, RefreshToken, Referral, GuardSessionCount, LocationPing,
+  DeviceCommand, SubscriptionEvent, Guardian, ShareLink,
+} from '@/models';
+import { deleteUserPhotos } from '@/services/storage';
+import { revokeAppleToken } from '@/lib/apple';
 import { JWTPayload, PLAN_LIMITS } from '@/types';
-import { cacheGet, cacheSet } from '@/config/redis';
+import { kvGet as cacheGet, kvSet as cacheSet, forgetUserState } from '@/config/kv';
 import { wsGetConnectionCount } from '@/services/wsService';
 
 const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
 
   // ── GET /dashboard/overview — main stats for web dashboard ────────
+  // Every tier can see its own overview — that is the whole promise of the web
+  // dashboard when the phone is missing.
   fastify.get('/overview', {
-    preHandler: [authenticate, requirePlan('guard', 'elite')],
+    preHandler: [authenticate],
   }, async (request, reply) => {
     const user  = request.user as JWTPayload;
     const cacheKey = `overview:${user.userId}`;
@@ -18,77 +24,18 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
     const cached = await cacheGet<unknown>(cacheKey);
     if (cached) return reply.code(200).send(cached);
 
-    const [
-      totalEvents,
-      totalAnomalies,
-      totalIntruders,
-      deviceCount,
-      recentAnomalies,
-      recentIntruders,
-      todayStats,
-      weekStats,
-    ] = await Promise.all([
-      ActivityEvent.countDocuments({ userId: user.userId }),
-      ActivityEvent.countDocuments({ userId: user.userId, isAnomalous: true }),
+    const [totalIntruders, deviceCount, recentIntruders] = await Promise.all([
       IntruderEvent.countDocuments({ userId: user.userId }),
       Device.countDocuments({ userId: user.userId, isActive: true }),
-
-      ActivityEvent.find({ userId: user.userId, isAnomalous: true })
-        .sort({ timestamp: -1 })
-        .limit(5)
-        .select('type appName timestamp anomalyReason deviceId')
-        .lean(),
-
       IntruderEvent.find({ userId: user.userId })
         .sort({ timestamp: -1 })
         .limit(5)
         .select('timestamp pinLayer failedAttempt photoUrl location')
         .lean(),
-
-      // Today's stats
-      ActivityEvent.aggregate([
-        {
-          $match: {
-            userId: { $eq: new Types.ObjectId(user.userId) },
-            timestamp: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) },
-          },
-        },
-        {
-          $group: {
-            _id:         null,
-            unlocks:     { $sum: { $cond: [{ $eq: ['$type', 'screen_unlocked'] }, 1, 0] } },
-            anomalies:   { $sum: { $cond: ['$isAnomalous', 1, 0] } },
-            screenTime:  { $sum: { $ifNull: ['$duration', 0] } },
-            totalEvents: { $sum: 1 },
-          },
-        },
-      ]),
-
-      // 7-day trend
-      ActivityEvent.aggregate([
-        {
-          $match: {
-            userId: { $eq: new Types.ObjectId(user.userId) },
-            timestamp: { $gte: new Date(Date.now() - 7 * 86_400_000) },
-          },
-        },
-        {
-          $group: {
-            _id:       { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } },
-            events:    { $sum: 1 },
-            anomalies: { $sum: { $cond: ['$isAnomalous', 1, 0] } },
-            unlocks:   { $sum: { $cond: [{ $eq: ['$type', 'screen_unlocked'] }, 1, 0] } },
-          },
-        },
-        { $sort: { _id: 1 } },
-      ]),
     ]);
 
     const overview = {
-      totals: { totalEvents, totalAnomalies, totalIntruders, deviceCount },
-      today:  todayStats[0] ?? { unlocks: 0, anomalies: 0, screenTime: 0, totalEvents: 0 },
-      weekTrend: weekStats,
-      recentAnomalies,
+      totals: { totalIntruders, deviceCount },
       recentIntruders,
       plan: {
         current:  user.plan,
@@ -101,50 +48,6 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.code(200).send(overview);
   });
 
-  // ── GET /dashboard/activity — paginated activity log ──────────────
-  fastify.get('/activity', {
-    preHandler: [authenticate, requirePlan('guard', 'elite')],
-  }, async (request, reply) => {
-    const user   = request.user as JWTPayload;
-    const query  = request.query as {
-      page?: string; limit?: string; deviceId?: string;
-      from?: string; to?: string; type?: string; anomalous?: string;
-    };
-
-    const page  = Math.max(1, parseInt(query.page ?? '1'));
-    const limit = Math.min(parseInt(query.limit ?? '50'), 200);
-    const skip  = (page - 1) * limit;
-
-    const maxDays = PLAN_LIMITS[user.plan].historyDays;
-    const from = query.from
-      ? new Date(query.from)
-      : new Date(Date.now() - maxDays * 86_400_000);
-    const to = query.to ? new Date(query.to) : new Date();
-
-    const filter: Record<string, unknown> = {
-      userId:    user.userId,
-      timestamp: { $gte: from, $lte: to },
-    };
-    if (query.deviceId)       filter.deviceId    = query.deviceId;
-    if (query.type)           filter.type        = query.type;
-    if (query.anomalous === 'true') filter.isAnomalous = true;
-
-    const [events, total] = await Promise.all([
-      ActivityEvent.find(filter)
-        .sort({ timestamp: -1 })
-        .skip(skip)
-        .limit(limit)
-        .select('-__v -userId')
-        .lean(),
-      ActivityEvent.countDocuments(filter),
-    ]);
-
-    return reply.code(200).send({
-      events,
-      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
-    });
-  });
-
   // ── GET /dashboard/me — user profile ──────────────────────────────
   fastify.get('/me', { preHandler: [authenticate] }, async (request, reply) => {
     const jwtUser = request.user as JWTPayload;
@@ -154,10 +57,13 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!user) return reply.code(404).send({ error: 'User not found.' });
 
+    // The plan in force (normalised legacy tiers, expiry honoured).
+    const plan = jwtUser.plan;
     return reply.code(200).send({
       user: {
         ...user,
-        planLimits: PLAN_LIMITS[user.plan as keyof typeof PLAN_LIMITS],
+        plan,
+        planLimits: PLAN_LIMITS[plan],
       },
     });
   });
@@ -167,29 +73,81 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
   // typed confirmation string rather than a password re-check.
   fastify.delete('/me', { preHandler: [authenticate] }, async (request, reply) => {
     const jwtUser = request.user as JWTPayload;
-    const body = request.body as { confirm?: string };
+    const body = (request.body ?? {}) as { confirm?: string };
 
     if (body.confirm !== 'DELETE MY ACCOUNT') {
       return reply.code(400).send({ error: 'Confirm with: "DELETE MY ACCOUNT"' });
     }
 
-    const user = await User.findById(jwtUser.userId).select('_id').lean();
+    const user = await User.findById(jwtUser.userId).select('_id +appleRefreshToken').lean();
     if (!user) return reply.code(404).send({ error: 'User not found.' });
+
+    // Sign in with Apple: revoke the authorisation (App Store Guideline 5.1.1(v)).
+    if (user.appleRefreshToken) await revokeAppleToken(user.appleRefreshToken);
+
+    const photosDeleted = await deleteUserPhotos(jwtUser.userId);
 
     // Cascade delete — including any refresh tokens so no session survives.
     await Promise.all([
+      DeviceCommand.deleteMany({ userId: jwtUser.userId }),
+      SubscriptionEvent.deleteMany({ userId: jwtUser.userId }),
+      forgetUserState(jwtUser.userId),
       ActivityEvent.deleteMany({ userId: jwtUser.userId }),
       IntruderEvent.deleteMany({ userId: jwtUser.userId }),
       Device.deleteMany({ userId: jwtUser.userId }),
       RefreshToken.deleteMany({ userId: jwtUser.userId }),
+      LocationPing.deleteMany({ userId: jwtUser.userId }),
+      Referral.deleteMany({ $or: [{ referrerId: jwtUser.userId }, { referredId: jwtUser.userId }] }),
+      GuardSessionCount.deleteMany({ userId: jwtUser.userId }),
+      Guardian.deleteMany({ userId: jwtUser.userId }),
+      ShareLink.deleteMany({ userId: jwtUser.userId }),
       User.deleteOne({ _id: jwtUser.userId }),
     ]);
 
-    return reply.code(200).send({ message: 'Account and all data deleted.' });
+    request.log.info(
+      { userId: jwtUser.userId, photosDeleted },
+      'Account deleted (including stored photos)',
+    );
+
+    return reply.code(200).send({ message: 'Account and all data deleted.', photosDeleted });
+  });
+
+  // ── End-to-end photo encryption ───────────────────────────────────
+  // The server only ever holds a SHA-256 of the owner's 256-bit photo key, so a
+  // new phone or the web dashboard can check a typed recovery key is the right
+  // one. It never sees the key, and can't decrypt a photo.
+  fastify.get('/e2e', { preHandler: [authenticate] }, async (request, reply) => {
+    const jwtUser = request.user as JWTPayload;
+    const user = await User.findById(jwtUser.userId).select('e2eKeyCheck').lean();
+    return reply.send({ enabled: !!user?.e2eKeyCheck, keyCheck: user?.e2eKeyCheck ?? null });
+  });
+
+  fastify.put('/e2e', { preHandler: [authenticate] }, async (request, reply) => {
+    const jwtUser = request.user as JWTPayload;
+    const body = (request.body ?? {}) as { keyCheck?: unknown; replace?: unknown };
+    if (typeof body.keyCheck !== 'string' || !/^[a-f0-9]{64}$/.test(body.keyCheck)) {
+      return reply.code(400).send({ error: 'Invalid key check.' });
+    }
+    const user = await User.findById(jwtUser.userId).select('e2eKeyCheck');
+    if (!user) return reply.code(404).send({ error: 'User not found.' });
+    // Swapping the key strands every photo encrypted with the old one, so it
+    // must be asked for explicitly.
+    if (user.e2eKeyCheck && user.e2eKeyCheck !== body.keyCheck && body.replace !== true) {
+      return reply.code(409).send({ error: 'Encryption is already on with a different key.' });
+    }
+    user.e2eKeyCheck = body.keyCheck;
+    await user.save();
+    return reply.send({ enabled: true });
+  });
+
+  fastify.delete('/e2e', { preHandler: [authenticate] }, async (request, reply) => {
+    const jwtUser = request.user as JWTPayload;
+    await User.updateOne({ _id: jwtUser.userId }, { $set: { e2eKeyCheck: null } });
+    return reply.send({ enabled: false });
   });
 
   // ── GET /dashboard/health — system health (internal/monitoring) ───
-  fastify.get('/health', async (_request, reply) => {
+  fastify.get('/health', { preHandler: [authenticate] }, async (_request, reply) => {
     return reply.code(200).send({
       status: 'ok',
       uptime: process.uptime(),

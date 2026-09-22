@@ -1,83 +1,101 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, AppState } from 'react-native';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { router } from 'expo-router';
 import { usePhantomStore } from '@/stores/phantom';
 import { ShieldLogo } from '@/components/ShieldLogo';
 import { Colors, Spacing, FontSize, Radius } from '@/constants/theme';
 import * as pinVault from '@/services/pinVault';
+import { stopSiren } from '@/services/alarm';
 
 export default function BiometricGateScreen() {
-  const { setAppUnlocked, isAuthenticated } = usePhantomStore();
+  const { setAppUnlocked } = usePhantomStore();
+  const hasAccess = usePhantomStore((st) => st.isAuthenticated || st.onboarded);
   const [authenticating, setAuthenticating] = useState(false);
-  const [supported, setSupported] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [hasPin, setHasPin] = useState(false);
+  const busy = useRef(false);
 
   useEffect(() => {
-    checkAndAuthenticate();
+    void pinVault.hasPin('app').then(setHasPin);
   }, []);
 
-  const checkAndAuthenticate = async () => {
-    const compatible = await LocalAuthentication.hasHardwareAsync();
-    const enrolled   = await LocalAuthentication.isEnrolledAsync();
-    if (!compatible || !enrolled) {
-      setSupported(false);
-      // No biometrics enrolled — DON'T silently open the app. Fall back to the
-      // dashboard PIN gate if one is configured; only open directly if the user
-      // has set no PIN at all (nothing to enforce).
-      const hasAnyPin = await pinVault.hasPin('dashboard');
-      if (hasAnyPin) {
-        router.replace({ pathname: '/pin-gate', params: { layer: 'dashboard', redirect: '/(tabs)' } });
-      } else {
-        proceedWithoutBiometric();
-      }
-      return;
-    }
-    authenticate();
-  };
+  const unlock = useCallback(() => {
+    // Owner verified — silence any remote "find my phone" siren.
+    stopSiren();
+    setAppUnlocked(true);
+    router.replace('/(tabs)');
+  }, [setAppUnlocked]);
 
-  const authenticate = async () => {
-    if (authenticating) return;
+  const authenticate = useCallback(async () => {
+    // The OS refuses a biometric prompt from a backgrounded app, so only ask
+    // while we are actually on screen.
+    if (busy.current || AppState.currentState !== 'active') return;
+    busy.current = true;
     setAuthenticating(true);
+    setError(null);
     try {
+      const [hasHardware, enrolled] = await Promise.all([
+        LocalAuthentication.hasHardwareAsync(),
+        LocalAuthentication.isEnrolledAsync(),
+      ]);
+      if (!hasHardware || !enrolled) {
+        // No biometrics — fall back to the PIN gate when any PIN exists. With no
+        // PIN anywhere there is nothing to enforce; the device passcode prompt
+        // below still verifies the owner.
+        if (await pinVault.hasPin('app')) {
+          router.replace('/pin-gate');
+          return;
+        }
+      }
       const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: 'Verify your identity to open PhantomShield',
+        promptMessage: 'Unlock PhantomShield',
         fallbackLabel: 'Use Passcode',
         cancelLabel: 'Cancel',
         disableDeviceFallback: false,
       });
-
       if (result.success) {
-        setAppUnlocked(true);
-        router.replace('/(tabs)');
-      } else {
-        // User cancelled — show retry option rather than looping automatically
+        unlock();
+      } else if (result.error === 'not_enrolled' || result.error === 'passcode_not_set') {
+        // No biometrics and no device passcode: the phone itself is unprotected
+        // and there is no PIN either — nothing to verify against.
+        unlock();
+      } else if (result.error !== 'user_cancel' && result.error !== 'system_cancel' && result.error !== 'app_cancel') {
+        setError('Verification failed. Try again.');
       }
     } catch {
-      Alert.alert('Authentication Error', 'Unable to use biometrics. Try again.');
+      setError('Unable to verify right now. Try again.');
     } finally {
+      busy.current = false;
       setAuthenticating(false);
     }
-  };
+  }, [unlock]);
 
-  const proceedWithoutBiometric = () => {
-    setAppUnlocked(true);
-    router.replace('/(tabs)');
-  };
+  useEffect(() => {
+    // An unauthenticated session must never reach the gate.
+    if (!hasAccess) {
+      router.replace('/(auth)/welcome');
+      return;
+    }
+    void authenticate();
+    // Mounted while backgrounded (the app was locked on the way out): prompt the
+    // moment the owner comes back.
+    const sub = AppState.addEventListener('change', (s) => { if (s === 'active') void authenticate(); });
+    return () => sub.remove();
+  }, [hasAccess, authenticate]);
 
-  if (!isAuthenticated) {
-    router.replace('/(auth)/welcome');
-    return null;
-  }
+  const usePin = () => router.replace('/pin-gate');
+
+  if (!hasAccess) return null;
 
   return (
     <View style={s.container}>
       <ShieldLogo size={72} />
 
       <View style={s.textBlock}>
-        <Text style={s.title}>Identity Required</Text>
-        <Text style={s.sub}>
-          PhantomShield requires verification every time you open the app.
-        </Text>
+        <Text style={s.title} accessibilityRole="header">PhantomShield is locked</Text>
+        <Text style={s.sub}>Verify it&apos;s you to continue.</Text>
+        {error && <Text style={s.error} accessibilityLiveRegion="polite">{error}</Text>}
       </View>
 
       <TouchableOpacity
@@ -85,15 +103,15 @@ export default function BiometricGateScreen() {
         onPress={authenticate}
         disabled={authenticating}
         activeOpacity={0.8}
+        accessibilityRole="button"
+        accessibilityLabel="Unlock with Face ID, fingerprint or passcode"
       >
-        <Text style={s.btnText}>
-          {authenticating ? 'Verifying…' : '🔐  Use Face ID / Fingerprint'}
-        </Text>
+        <Text style={s.btnText}>{authenticating ? 'Verifying…' : 'Unlock'}</Text>
       </TouchableOpacity>
 
-      {!supported && (
-        <TouchableOpacity onPress={proceedWithoutBiometric} style={s.skip}>
-          <Text style={s.skipText}>Continue without biometrics</Text>
+      {hasPin && (
+        <TouchableOpacity onPress={usePin} style={s.skip} accessibilityRole="button">
+          <Text style={s.skipText}>Use my PhantomShield PIN</Text>
         </TouchableOpacity>
       )}
     </View>
@@ -112,6 +130,7 @@ const s = StyleSheet.create({
   textBlock: { alignItems: 'center', gap: Spacing.sm },
   title: { fontSize: FontSize.xxl, fontWeight: '700', color: Colors.textPrimary, textAlign: 'center' },
   sub:   { fontSize: FontSize.sm,  color: Colors.textSecondary, textAlign: 'center', lineHeight: 22 },
+  error: { fontSize: FontSize.sm, color: Colors.accent, textAlign: 'center' },
   btn: {
     width: '100%',
     backgroundColor: Colors.primary,
@@ -121,6 +140,6 @@ const s = StyleSheet.create({
   },
   btnDisabled: { opacity: 0.6 },
   btnText:     { fontSize: FontSize.md, fontWeight: '700', color: Colors.bg },
-  skip:        { marginTop: -Spacing.md },
+  skip:        { marginTop: -Spacing.md, padding: Spacing.sm },
   skipText:    { fontSize: FontSize.sm, color: Colors.textSecondary },
 });

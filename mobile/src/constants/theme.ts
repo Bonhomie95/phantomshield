@@ -12,7 +12,11 @@ export const Colors = {
   warning:     '#FFAA00',
   textPrimary:   '#E8EDF5',
   textSecondary: '#7A8CA0',
-  textMuted:     '#3D4F63',
+  // Was #3D4F63 — 2.2–2.3:1 against the app's backgrounds, well below the
+  // WCAG AA 4.5:1 minimum, on the token used for stat labels, section headers
+  // and timestamps. #8496AC clears AA on bg (6.5) and cards (6.1) while
+  // staying visibly quieter than textSecondary.
+  textMuted:     '#8496AC',
   textOnPrimary: '#000D14',
   pinDot: '#1E2A3E',
   pinKey: '#0F1420',

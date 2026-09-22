@@ -60,7 +60,7 @@ export const StatCard = ({
 
 // ─── Badge ────────────────────────────────────────────────────────────────────
 
-type BadgeVariant = 'default' | 'accent' | 'success' | 'warning' | 'danger' | 'plan-guard' | 'plan-elite';
+type BadgeVariant = 'default' | 'accent' | 'success' | 'warning' | 'danger' | 'plan-starter' | 'plan-pro';
 
 const BADGE_STYLES: Record<BadgeVariant, string> = {
   default:     'bg-phantom-border/60 text-phantom-muted',
@@ -68,8 +68,8 @@ const BADGE_STYLES: Record<BadgeVariant, string> = {
   success:     'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20',
   warning:     'bg-amber-500/10 text-amber-400 border border-amber-500/20',
   danger:      'bg-red-500/10 text-phantom-danger border border-red-500/20',
-  'plan-guard':'bg-blue-500/10 text-blue-400 border border-blue-500/20',
-  'plan-elite':'bg-purple-500/10 text-purple-400 border border-purple-500/20',
+  'plan-starter':'bg-blue-500/10 text-blue-400 border border-blue-500/20',
+  'plan-pro':'bg-purple-500/10 text-purple-400 border border-purple-500/20',
 };
 
 export const Badge = ({
@@ -119,6 +119,12 @@ export const Button = ({
     {children}
   </button>
 );
+
+// ─── Text input ───────────────────────────────────────────────────────────────
+
+/** Shared classes for plain <input>/<textarea> fields. */
+export const INPUT_CLS =
+  'w-full bg-phantom-card border border-phantom-border rounded-xl px-3 py-2 text-sm text-phantom-text placeholder:text-phantom-faint focus:outline-none focus:border-phantom-accent/50';
 
 // ─── Alert Banner ─────────────────────────────────────────────────────────────
 

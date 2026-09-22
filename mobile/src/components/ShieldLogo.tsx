@@ -26,7 +26,7 @@ export function ShieldLogo({ size = 60, animated = false, pulse = false, style }
         ])
       ).start();
     }
-  }, [animated, pulse]);
+  }, [animated, pulse, glowAnim, pulseAnim]);
 
   const opacity = animated
     ? glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] })

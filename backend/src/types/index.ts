@@ -1,5 +1,5 @@
 import { FastifyRequest } from 'fastify';
-import type { PlanId, SyncBatch } from '@phantomshield/shared';
+import type { PlanId } from '@phantomshield/shared';
 
 // Re-export the shared API contract so the rest of the backend can keep
 // importing everything from '@/types'. The canonical definitions live in
@@ -11,8 +11,11 @@ export * from '@phantomshield/shared';
 export interface JWTPayload {
   userId:   string;
   deviceId: string;
-  email:    string;
+  /** Absent for an Apple account without a shared email. */
+  email?:   string;
   plan:     PlanId;
+  /** Unique access-token id, used for revocation via the token blocklist. */
+  jti?: string;
   iat?: number;
   exp?: number;
 }
@@ -23,11 +26,20 @@ export interface AuthenticatedRequest extends FastifyRequest {
 
 /** Normalised identity after verifying a provider token (server-side only). */
 export interface VerifiedOAuthIdentity {
-  providerId: string;   // provider's user sub/uid
-  email:      string;
-  name?:      string;
-  photo?:     string;
+  providerId:    string;   // provider's user sub/uid
+  email?:        string;
+  /** True only when the provider asserted the email is verified in the signed token. */
+  emailVerified: boolean;
+  name?:         string;
+  photo?:        string;
 }
 
-/** @deprecated Kept for existing imports — use `SyncBatch` from the shared contract. */
-export type SyncBatchPayload = SyncBatch;
+/** Shape of the errors we inspect in catch blocks (Mongo driver, provider SDKs). */
+export interface AppError {
+  code?: number;
+  message?: string;
+  writeErrors?: unknown;
+  result?: { nInserted?: number };
+  insertedDocs?: unknown[];
+  statusCode?: number;
+}

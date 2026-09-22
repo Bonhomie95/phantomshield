@@ -9,12 +9,17 @@
     "backend",
     "dashboard"
   ],
+  "//overrides-note": "Pin one TypeScript across all workspaces. ts-node-dev peers on `typescript@*`, which otherwise lets npm auto-install a newer major (6.x) nested under backend, skewing it from the 5.9.x the rest of the repo (and the Node 20 runtime types) use.",
+  "overrides": {
+    "typescript": "5.9.3"
+  },
   "scripts": {
     "build:shared": "npm --workspace @phantomshield/shared run build",
     "typecheck": "npm run build:shared && npm run typecheck --workspaces --if-present && npm run typecheck:mobile",
     "typecheck:mobile": "npm --prefix mobile run typecheck",
     "install:all": "npm install && npm --prefix mobile install",
-    "test": "npm --workspace phantomshield-backend test",
-    "lint": "npm run lint --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present && npm run lint:mobile",
+    "lint:mobile": "npm --prefix mobile run lint"
   }
 }

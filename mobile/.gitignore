@@ -30,8 +30,12 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
-.env*.local
+# local env files — ignore the real .env too (it holds analytics/OAuth keys),
+# not only *.local. Mobile installs standalone, so it can't rely on the root
+# .gitignore if it's ever split out.
+.env
+.env.*
+!.env.example
 
 # typescript
 *.tsbuildinfo

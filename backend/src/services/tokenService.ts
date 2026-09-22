@@ -1,8 +1,7 @@
 import crypto from 'crypto';
 import { FastifyInstance } from 'fastify';
-import { JWTPayload, PlanId } from '@/types';
+import { JWTPayload, normalizePlan } from '@/types';
 import { RefreshToken, IUser, IDevice } from '@/models';
-import { blockToken, isTokenBlocked } from '@/config/redis';
 
 const REFRESH_EXPIRES_DAYS = 7;
 
@@ -17,7 +16,10 @@ export const generateAccessToken = (
     userId:   user._id.toString(),
     deviceId: device.deviceId,
     email:    user.email,
-    plan:     user.plan as PlanId,
+    plan:     normalizePlan(user.plan),
+    // Unique token id so a specific access token can be revoked on logout /
+    // device removal before its 15-min expiry (see blockToken/isTokenBlocked).
+    jti:      crypto.randomBytes(16).toString('hex'),
   };
   return fastify.jwt.sign(payload, { expiresIn: process.env.JWT_EXPIRES_IN ?? '15m' });
 };
@@ -48,24 +50,28 @@ export const verifyRefreshToken = async (
 ): Promise<{ userId: string } | null> => {
   const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
 
-  // Look the token up regardless of state so we can distinguish "unknown" from
-  // "known but already rotated" — the latter is a reuse/replay signal.
+  // Atomically claim-and-revoke the token: only one caller can flip a live token
+  // to revoked, so two concurrent refreshes with the same token can't both mint
+  // a new pair (double-spend). A matched-and-updated result is a valid rotation.
+  const claimed = await RefreshToken.findOneAndUpdate(
+    { tokenHash, deviceId, isRevoked: false, expiresAt: { $gt: new Date() } },
+    { $set: { isRevoked: true } },
+    { new: false }
+  );
+  if (claimed) return { userId: claimed.userId.toString() };
+
+  // No live token matched. Look it up regardless of state to tell apart the
+  // cases: unknown token, plain expiry, or a genuine reuse of an already-rotated
+  // token (the replay signal that warrants revoking the whole family).
   const record = await RefreshToken.findOne({ tokenHash, deviceId });
   if (!record) return null;
 
-  if (record.isRevoked || record.expiresAt <= new Date()) {
-    // A rotated refresh token was presented again. In normal rotation the old
-    // token is never reused, so this means it was captured and replayed —
-    // revoke every token for this user+device to force a fresh sign-in.
-    await RefreshToken.updateMany(
-      { userId: record.userId, deviceId },
-      { isRevoked: true }
-    );
+  if (record.isRevoked) {
+    await RefreshToken.updateMany({ userId: record.userId, deviceId }, { isRevoked: true });
     console.warn(`[Auth] Refresh token reuse detected for user ${record.userId} / device ${deviceId} — family revoked.`);
-    return null;
   }
-
-  return { userId: record.userId.toString() };
+  // Plain expiry is not a replay signal — just reject it.
+  return null;
 };
 
 export const revokeRefreshToken = async (rawToken: string): Promise<void> => {
@@ -75,19 +81,4 @@ export const revokeRefreshToken = async (rawToken: string): Promise<void> => {
 
 export const revokeAllUserTokens = async (userId: string): Promise<void> => {
   await RefreshToken.updateMany({ userId }, { isRevoked: true });
-};
-
-// ─── JWT Payload Verification with Blocklist ──────────────────────────────────
-
-export const verifyAndCheckToken = async (
-  fastify: FastifyInstance,
-  token: string
-): Promise<JWTPayload | null> => {
-  try {
-    const decoded = fastify.jwt.verify<JWTPayload & { jti?: string }>(token);
-    if (decoded.jti && await isTokenBlocked(decoded.jti)) return null;
-    return decoded;
-  } catch {
-    return null;
-  }
 };

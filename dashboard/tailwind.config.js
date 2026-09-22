@@ -18,7 +18,12 @@ module.exports = {
           success: '#2ED573',
           text:    '#EEF2FF',
           muted:   '#8899BB',
-          faint:   '#445577',
+          // Was #445577, which scored 2.1–2.6:1 against the three surface
+          // colours — far below the WCAG AA 4.5:1 minimum, on the token used
+          // for every section header, timestamp and helper line. #7A8CA0
+          // clears AA on bg (5.6), surface (5.1) and card (4.6), and matches
+          // the mobile app's token so the two clients share one scale.
+          faint:   '#7A8CA0',
         },
       },
       fontFamily: {

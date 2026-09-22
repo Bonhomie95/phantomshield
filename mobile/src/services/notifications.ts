@@ -52,18 +52,30 @@ export async function getExpoPushToken(): Promise<string | null> {
   }
 }
 
+/** Android channel id — the backend's pushes use the same id (pushService.ts). */
+export const ALERT_CHANNEL = 'phantom-alerts';
+
+/** Create the Android alert channel. Safe to call at every launch; asks nothing. */
+export async function initNotificationChannel(): Promise<void> {
+  const N = await getNotifications();
+  if (!N || Platform.OS !== 'android') return;
+  await N.setNotificationChannelAsync(ALERT_CHANNEL, {
+    name: 'Security alerts',
+    description: 'Intruder attempts, Guard Mode and Find My Phone alerts',
+    importance: N.AndroidImportance.HIGH,
+    vibrationPattern: [0, 250, 250, 250],
+    lightColor: '#00D4FF',
+  }).catch(() => {});
+}
+
+/** Local notifications land on the alert channel on Android. */
+const now = () => (Platform.OS === 'android' ? { channelId: ALERT_CHANNEL } : null);
+
 export async function requestNotificationPermissions(): Promise<boolean> {
   const N = await getNotifications();
   if (!N) return false;
 
-  if (Platform.OS === 'android') {
-    await N.setNotificationChannelAsync('phantom-alerts', {
-      name: 'PhantomShield Alerts',
-      importance: N.AndroidImportance.HIGH,
-      vibrationPattern: [0, 250, 250, 250],
-      lightColor: '#00D4FF',
-    });
-  }
+  await initNotificationChannel();
 
   const { status: existing } = await N.getPermissionsAsync();
   if (existing === 'granted') return true;
@@ -71,18 +83,30 @@ export async function requestNotificationPermissions(): Promise<boolean> {
   return status === 'granted';
 }
 
-export async function sendAnomalyAlert(reason: string): Promise<void> {
+/**
+ * Lost mode on the lock screen. Local, so it shows even if the server's push
+ * didn't arrive; sticky on Android so a finder can't just swipe it away.
+ */
+export async function presentLostModeNotification(message: string, contact: string): Promise<void> {
   const N = await getNotifications();
   if (!N) return;
   await N.scheduleNotificationAsync({
+    identifier: 'lost-mode',
     content: {
-      title: '⚠️ PhantomShield Alert',
-      body: reason,
+      title: 'This phone is lost',
+      body: contact ? `${message}\nContact: ${contact}` : message,
+      sticky: true,
       sound: true,
-      data: { type: 'anomaly' },
+      data: { type: 'lost_mode' },
     },
-    trigger: null,
+    trigger: now(),
   });
+}
+
+export async function dismissLostModeNotification(): Promise<void> {
+  const N = await getNotifications();
+  if (!N) return;
+  await N.dismissNotificationAsync('lost-mode').catch(() => {});
 }
 
 export async function sendIntruderAlert(layerName: string, attemptNumber: number): Promise<void> {
@@ -90,12 +114,12 @@ export async function sendIntruderAlert(layerName: string, attemptNumber: number
   if (!N) return;
   await N.scheduleNotificationAsync({
     content: {
-      title: '🚨 Unauthorized Access Attempt',
-      body: `Wrong PIN entered for ${layerName} (attempt ${attemptNumber}). Photo captured and saved to Vault.`,
+      title: 'Wrong PIN entered',
+      body: `Wrong PIN entered for ${layerName} (attempt ${attemptNumber}). Details are in the Vault.`,
       sound: true,
       data: { type: 'intruder' },
     },
-    trigger: null,
+    trigger: now(),
   });
 }
 
@@ -109,12 +133,12 @@ export async function presentArmedNotification(): Promise<string | null> {
   try {
     return await N.scheduleNotificationAsync({
       content: {
-        title: '🛡 PhantomShield is armed',
-        body: 'Guard Mode is watching your phone. Tap the app to disarm.',
+        title: 'Guard Mode is on',
+        body: 'Open PhantomShield and enter your PIN to stop it.',
         sticky: true,
         data: { type: 'armed' },
       },
-      trigger: null,
+      trigger: now(),
     });
   } catch {
     return null;
@@ -133,11 +157,11 @@ export async function sendTamperAlert(): Promise<void> {
   if (!N) return;
   await N.scheduleNotificationAsync({
     content: {
-      title: '🛡️ PhantomShield Warning',
-      body: 'Tracking was interrupted. Open the app to review what happened.',
+      title: 'Find My Phone alert',
+      body: 'An alarm was triggered on this phone from your PhantomShield dashboard.',
       sound: true,
       data: { type: 'tamper' },
     },
-    trigger: null,
+    trigger: now(),
   });
 }

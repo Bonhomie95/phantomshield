@@ -1,108 +1,84 @@
 /**
- * Object storage for intruder photos (Cloudflare R2, S3-compatible).
+ * Intruder photo storage, in MongoDB.
  *
- * Presigned URLs are generated with a hand-rolled AWS SigV4 signer using Node's
- * crypto — no @aws-sdk dependency. The device uploads the photo directly to R2
- * over TLS with a presigned PUT; the dashboard reads it with a short-lived
- * presigned GET. Nothing but the object key is stored in our DB.
- *
- * Disabled cleanly when R2 env vars are absent: isStorageConfigured() is false
- * and callers fall back to on-device-only behaviour.
+ * The device uploads the JPEG to the API (PUT /sync/intruder/:id/photo) and the
+ * dashboard reads it back through the authenticated GET on the same path. Every
+ * read and write is scoped by the authenticated user id, so there is no key a
+ * caller could supply to reach another account's photo.
  */
-import crypto from 'crypto';
+import { IntruderPhoto } from '@/models';
+import { ENCRYPTED_PHOTO_CONTENT_TYPE, ENCRYPTED_PHOTO_MAGIC } from '@/types';
 
-const ACCOUNT_ID = process.env.R2_ACCOUNT_ID ?? '';
-const ACCESS_KEY = process.env.R2_ACCESS_KEY_ID ?? '';
-const SECRET_KEY = process.env.R2_SECRET_ACCESS_KEY ?? '';
-const BUCKET     = process.env.R2_BUCKET_NAME ?? '';
-const REGION     = 'auto';
-const SERVICE    = 's3';
+export { ENCRYPTED_PHOTO_CONTENT_TYPE };
 
-export function isStorageConfigured(): boolean {
-  return Boolean(ACCOUNT_ID && ACCESS_KEY && SECRET_KEY && BUCKET);
+/** Largest accepted upload. Photos are downscaled to 1280px on-device (~300KB). */
+export const MAX_PHOTO_BYTES = 3 * 1024 * 1024;
+
+/** Content-Type an intruder-photo upload must use. */
+export const INTRUDER_CONTENT_TYPE = 'image/jpeg';
+
+/** Event ids are client-generated; keep them to a safe charset before storing. */
+export function safeEventId(eventId: string): string {
+  return eventId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
 }
 
-function host(): string {
-  return `${ACCOUNT_ID}.r2.cloudflarestorage.com`;
+/** Stable reference recorded on the IntruderEvent row (never used as a lookup key). */
+export function intruderKey(userId: string, eventId: string): string {
+  return `intruder/${userId}/${safeEventId(eventId)}.jpg`;
 }
 
-function hmac(key: crypto.BinaryLike | Buffer, data: string): Buffer {
-  return crypto.createHmac('sha256', key).update(data, 'utf8').digest();
-}
-
-function sha256Hex(data: string): string {
-  return crypto.createHash('sha256').update(data, 'utf8').digest('hex');
-}
-
-// RFC 3986 encode, preserving path separators in the object key.
-function encodeKey(key: string): string {
-  return key
-    .split('/')
-    .map((seg) => encodeURIComponent(seg).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase()))
-    .join('/');
-}
-
-function amzDates(now = new Date()): { amzDate: string; dateStamp: string } {
-  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '').slice(0, 15) + 'Z'; // YYYYMMDDTHHMMSSZ
-  return { amzDate, dateStamp: amzDate.slice(0, 8) };
+/** True when the buffer starts with the JPEG SOI marker. */
+export function isJpeg(buf: Buffer): boolean {
+  return buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
 }
 
 /**
- * Build a presigned URL (query-string auth) for a PUT or GET on the given key.
+ * True for an end-to-end encrypted photo: magic, a 12-byte nonce and at least
+ * a GCM tag. The server can't read it and doesn't try — it only checks shape.
  */
-function presign(method: 'PUT' | 'GET', key: string, expiresSeconds: number): string {
-  const { amzDate, dateStamp } = amzDates();
-  const credentialScope = `${dateStamp}/${REGION}/${SERVICE}/aws4_request`;
-  const canonicalUri = `/${BUCKET}/${encodeKey(key)}`;
+export function isEncryptedPhoto(buf: Buffer): boolean {
+  return buf.length > 4 + 12 + 16 && ENCRYPTED_PHOTO_MAGIC.every((b, i) => buf[i] === b);
+}
 
-  const query: Record<string, string> = {
-    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
-    'X-Amz-Credential': `${ACCESS_KEY}/${credentialScope}`,
-    'X-Amz-Date': amzDate,
-    'X-Amz-Expires': String(expiresSeconds),
-    'X-Amz-SignedHeaders': 'host',
+export async function savePhoto(
+  userId: string,
+  eventId: string,
+  data: Buffer,
+  contentType: string = INTRUDER_CONTENT_TYPE,
+): Promise<void> {
+  await IntruderPhoto.updateOne(
+    { userId, eventId: safeEventId(eventId) },
+    { $set: { data, size: data.length, contentType } },
+    { upsert: true },
+  );
+}
+
+export async function getPhoto(userId: string, eventId: string): Promise<{ data: Buffer; contentType: string } | null> {
+  const doc = await IntruderPhoto.findOne({ userId, eventId: safeEventId(eventId) })
+    .select('data contentType')
+    .lean();
+  if (!doc?.data) return null;
+  // lean() yields a BSON Binary, not a Buffer; its bytes live on `.buffer`.
+  const raw = doc.data as unknown as Buffer | { buffer: Uint8Array };
+  return {
+    data: Buffer.isBuffer(raw) ? raw : Buffer.from(raw.buffer),
+    contentType: doc.contentType ?? INTRUDER_CONTENT_TYPE,
   };
-  const canonicalQuery = Object.keys(query)
-    .sort()
-    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(query[k])}`)
-    .join('&');
-
-  const canonicalHeaders = `host:${host()}\n`;
-  const canonicalRequest = [
-    method,
-    canonicalUri,
-    canonicalQuery,
-    canonicalHeaders,
-    'host',
-    'UNSIGNED-PAYLOAD',
-  ].join('\n');
-
-  const stringToSign = [
-    'AWS4-HMAC-SHA256',
-    amzDate,
-    credentialScope,
-    sha256Hex(canonicalRequest),
-  ].join('\n');
-
-  const kDate = hmac(`AWS4${SECRET_KEY}`, dateStamp);
-  const kRegion = hmac(kDate, REGION);
-  const kService = hmac(kRegion, SERVICE);
-  const kSigning = hmac(kService, 'aws4_request');
-  const signature = crypto.createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
-
-  return `https://${host()}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`;
 }
 
-/** Deterministic object key for an intruder photo. */
-export function intruderKey(userId: string, eventId: string): string {
-  const safeId = eventId.replace(/[^a-zA-Z0-9_-]/g, '');
-  return `intruder/${userId}/${safeId}.jpg`;
+export async function hasPhoto(userId: string, eventId: string): Promise<boolean> {
+  return !!(await IntruderPhoto.exists({ userId, eventId: safeEventId(eventId) }));
 }
 
-export function presignUpload(key: string, expiresSeconds = 300): string {
-  return presign('PUT', key, expiresSeconds);
+/** Photos stored for a user since `since` — the monthly quota counter. */
+export async function countPhotosSince(userId: string, since: Date): Promise<number> {
+  return IntruderPhoto.countDocuments({ userId, createdAt: { $gte: since } });
 }
 
-export function presignDownload(key: string, expiresSeconds = 300): string {
-  return presign('GET', key, expiresSeconds);
+/** Delete a user's photos — all of them, or only the listed events. */
+export async function deleteUserPhotos(userId: string, eventIds?: string[]): Promise<number> {
+  const filter: Record<string, unknown> = { userId };
+  if (eventIds) filter.eventId = { $in: eventIds.map(safeEventId) };
+  const res = await IntruderPhoto.deleteMany(filter);
+  return res.deletedCount ?? 0;
 }

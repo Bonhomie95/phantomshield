@@ -1,18 +1,30 @@
 import React from 'react';
-import { Text } from 'react-native';
-import { Tabs } from 'expo-router';
+import { Tabs, Redirect } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/theme';
+import { usePhantomStore } from '@/stores/phantom';
 
-function TabIcon({ emoji, active }: { emoji: string; active: boolean }) {
-  return <Text style={{ fontSize: 22, opacity: active ? 1 : 0.4 }}>{emoji}</Text>;
-}
+type IconName = React.ComponentProps<typeof Ionicons>['name'];
+
+const tabIcon = (on: IconName, off: IconName) =>
+  function TabIcon({ focused, color }: { focused: boolean; color: string }) {
+    return <Ionicons name={focused ? on : off} size={24} color={color} />;
+  };
 
 export default function TabLayout() {
   // Android is edge-to-edge in SDK 54+, so the system navigation bar (buttons
   // or gesture pill) overlays the bottom of the screen. Pad the tab bar by the
   // bottom inset or the tabs render underneath it and can't be tapped.
   const insets = useSafeAreaInsets();
+  const hasAccess = usePhantomStore((s) => s.isAuthenticated || s.onboarded);
+  const isAppUnlocked = usePhantomStore((s) => s.isAppUnlocked);
+
+  // The app is only ever entered through the identity gate. Without this, a
+  // deep link (phantomshield://settings) or a restored navigation state would
+  // mount the tabs directly and skip biometric/PIN verification.
+  if (!hasAccess) return <Redirect href="/(auth)/welcome" />;
+  if (!isAppUnlocked) return <Redirect href="/biometric-gate" />;
 
   return (
     <Tabs
@@ -32,34 +44,16 @@ export default function TabLayout() {
     >
       <Tabs.Screen
         name="index"
-        options={{
-          title: 'Dashboard',
-          tabBarIcon: ({ focused }) => <TabIcon emoji="🛡️" active={focused} />,
-        }}
-      />
-      <Tabs.Screen
-        name="activity"
-        options={{
-          title: 'Activity',
-          tabBarIcon: ({ focused }) => <TabIcon emoji="📊" active={focused} />,
-        }}
+        options={{ title: 'Protect', tabBarIcon: tabIcon('shield-checkmark', 'shield-checkmark-outline') }}
       />
       <Tabs.Screen
         name="vault"
-        options={{
-          title: 'Vault',
-          tabBarIcon: ({ focused }) => <TabIcon emoji="🔒" active={focused} />,
-        }}
+        options={{ title: 'Evidence', tabBarIcon: tabIcon('images', 'images-outline') }}
       />
       <Tabs.Screen
         name="settings"
-        options={{
-          title: 'Settings',
-          tabBarIcon: ({ focused }) => <TabIcon emoji="⚙️" active={focused} />,
-        }}
+        options={{ title: 'Settings', tabBarIcon: tabIcon('settings', 'settings-outline') }}
       />
-      {/* explore.tsx must exist as a file but we hide it from the tab bar */}
-      <Tabs.Screen name="explore" options={{ href: null }} />
     </Tabs>
   );
 }

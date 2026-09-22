@@ -3,42 +3,41 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   PhantomState,
-  AppUsageEvent,
   UnlockEvent,
   IntruderPhoto,
-  PINLayer,
   User,
-  SafeZone,
   GuardEvent,
+  LostMode,
 } from '@/constants/types';
+
+/** Newest N intruder photos kept on-device; older ones are deleted from disk. */
+const MAX_INTRUDER_PHOTOS = 200;
 
 interface PhantomStore extends PhantomState {
   // Auth
   setUser: (user: User | null) => void;
   setAuthenticated: (v: boolean) => void;
+  setOnboarded: (v: boolean) => void;
   setAppUnlocked: (v: boolean) => void;
-  unlockLayer: (layer: PINLayer) => void;
-  lockLayer: (layer: PINLayer) => void;
-  lockAllLayers: () => void;
 
-  // Tracking
-  setTrackingEnabled: (v: boolean) => void;
-  addActivityEvent: (e: AppUsageEvent) => void;
+  // Evidence
+  setPhotoQuotaReached: (v: boolean) => void;
   addUnlockEvent: (e: UnlockEvent) => void;
   addIntruderPhoto: (p: IntruderPhoto) => void;
   clearLogs: () => void;
 
   // Config
   setLocationEnabled: (v: boolean) => void;
+  setLocationTrackingEnabled: (v: boolean) => void;
+  setBackgroundGuardEnabled: (v: boolean) => void;
   setIntruderSnapshotEnabled: (v: boolean) => void;
+  setLostMode: (v: LostMode | null) => void;
+  setE2eEnabled: (v: boolean) => void;
 
   // Guard Mode event log
   addGuardEvent: (e: GuardEvent) => void;
   clearGuardEvents: () => void;
   setGuardArmed: (v: boolean) => void;
-  addSafeZone: (z: SafeZone) => void;
-  removeSafeZone: (id: string) => void;
-  updateSafeZone: (id: string, patch: Partial<SafeZone>) => void;
 }
 
 export const usePhantomStore = create<PhantomStore>()(
@@ -47,92 +46,97 @@ export const usePhantomStore = create<PhantomStore>()(
       // ── Initial state ────────────────────────────────────────────────────
       user: null,
       isAuthenticated: false,
-      // These two are intentionally NOT persisted (see partialize below)
-      // so every app open requires biometric re-auth
+      onboarded: false,
+      // Intentionally NOT persisted (see partialize below) so every app open
+      // requires biometric / PIN re-auth.
       isAppUnlocked: false,
-      unlockedLayers: [],
 
-      trackingEnabled: false,   // off by default — user must explicitly enable
-      recentActivity: [],
+      photoQuotaReached: false,
       unlockEvents: [],
       intruderPhotos: [],
 
       decoyPinSet: false,
-      safeZones: [],
       locationEnabled: false,
-      intruderSnapshotEnabled: true,
+      locationTrackingEnabled: false,
+      backgroundGuardEnabled: false,
+      // Opt-in: the camera is only ever used after the owner switches this on
+      // (onboarding or Settings), which is also when the OS permission is asked.
+      intruderSnapshotEnabled: false,
       autoWipeAfterAttempts: 10,
       guardEvents: [],
       guardArmed: false, // transient — never persisted (see partialize)
+      lostMode: null,
+      e2eEnabled: false,
 
       devices: [],
 
       // ── Actions ──────────────────────────────────────────────────────────
       setUser:          (user)  => set({ user }),
       setAuthenticated: (v)     => set({ isAuthenticated: v }),
+      setOnboarded:     (v)     => set({ onboarded: v }),
       setAppUnlocked:   (v)     => set({ isAppUnlocked: v }),
 
-      unlockLayer: (layer) =>
-        set((s) => ({
-          unlockedLayers: s.unlockedLayers.includes(layer)
-            ? s.unlockedLayers
-            : [...s.unlockedLayers, layer],
-        })),
-      lockLayer: (layer) =>
-        set((s) => ({ unlockedLayers: s.unlockedLayers.filter((l) => l !== layer) })),
-      lockAllLayers: () => set({ unlockedLayers: [] }),
-
-      setTrackingEnabled: (v) => set({ trackingEnabled: v }),
-
-      addActivityEvent: (e) =>
-        set((s) => ({
-          // Keep latest 500 events — oldest drop off
-          recentActivity: [e, ...s.recentActivity].slice(0, 500),
-        })),
+      setPhotoQuotaReached: (v) => set({ photoQuotaReached: v }),
 
       addUnlockEvent: (e) =>
         set((s) => ({
           unlockEvents: [e, ...s.unlockEvents].slice(0, 200),
         })),
 
+      // Capped like every other list. Guard Mode appends to it per capture, and
+      // zustand rewrites the whole persisted blob on every set — unbounded, it
+      // crossed Android's ~2MB AsyncStorage value limit and persistence failed
+      // silently. Evicted entries' files are cleaned off disk.
       addIntruderPhoto: (p) =>
-        set((s) => ({ intruderPhotos: [p, ...s.intruderPhotos] })),
+        set((s) => {
+          const next = [p, ...s.intruderPhotos];
+          const evicted = next.slice(MAX_INTRUDER_PHOTOS);
+          if (evicted.length) {
+            void import('@/services/camera').then(({ deleteIntruderPhoto }) => {
+              evicted.forEach((e) => {
+                if (e.imageUri) void deleteIntruderPhoto(e.imageUri).catch(() => {});
+              });
+            });
+          }
+          return { intruderPhotos: next.slice(0, MAX_INTRUDER_PHOTOS) };
+        }),
 
-      clearLogs: () => set({ recentActivity: [], unlockEvents: [], intruderPhotos: [] }),
+      clearLogs: () => set({ unlockEvents: [], intruderPhotos: [], guardEvents: [] }),
 
       setLocationEnabled:         (v) => set({ locationEnabled: v }),
+      setLocationTrackingEnabled: (v) => set({ locationTrackingEnabled: v }),
+      setBackgroundGuardEnabled:  (v) => set({ backgroundGuardEnabled: v }),
       setIntruderSnapshotEnabled: (v) => set({ intruderSnapshotEnabled: v }),
+      setLostMode:                (v) => set({ lostMode: v }),
+      setE2eEnabled:              (v) => set({ e2eEnabled: v }),
 
       addGuardEvent: (e) =>
         set((s) => ({ guardEvents: [e, ...s.guardEvents].slice(0, 500) })),
       clearGuardEvents: () => set({ guardEvents: [] }),
       setGuardArmed: (v) => set({ guardArmed: v }),
-
-      addSafeZone: (z) =>
-        set((s) => ({ safeZones: [...s.safeZones, z] })),
-      removeSafeZone: (id) =>
-        set((s) => ({ safeZones: s.safeZones.filter((z) => z.id !== id) })),
-      updateSafeZone: (id, patch) =>
-        set((s) => ({
-          safeZones: s.safeZones.map((z) => (z.id === id ? { ...z, ...patch } : z)),
-        })),
     }),
     {
       name: 'phantomshield-v1',
       storage: createJSONStorage(() => AsyncStorage),
-      // Bumped to 2 when PINs moved out of persisted state into the keychain.
-      version: 2,
-      // Strip legacy plaintext `pins` left in AsyncStorage by v1 builds.
-      migrate: (persisted: any) => {
+      // 2: PINs moved out of persisted state into the keychain.
+      // 3: activity logging, trusted hours and per-section PIN unlocks removed.
+      version: 3,
+      migrate: (persisted: any, version) => {
         if (persisted && 'pins' in persisted) delete persisted.pins;
+        if (persisted && version < 3) {
+          for (const k of ['recentActivity', 'trackingEnabled', 'lastSyncedAt', 'safeZones', 'unlockedLayers']) {
+            delete persisted[k];
+          }
+          // Anyone upgrading already went through setup.
+          persisted.onboarded = !!persisted.isAuthenticated;
+        }
         return persisted;
       },
-      // isAppUnlocked and unlockedLayers are NEVER persisted —
-      // every cold start requires biometric re-auth and fresh PIN entry.
-      // guardArmed is transient too — a killed-while-armed session must not
-      // resume as "armed" on next launch.
+      // isAppUnlocked is NEVER persisted — every cold start requires fresh
+      // verification. guardArmed is transient too — a killed-while-armed
+      // session must not resume as "armed" on next launch.
       partialize: (state) => {
-        const { isAppUnlocked, unlockedLayers, guardArmed, ...rest } = state;
+        const { isAppUnlocked, guardArmed, ...rest } = state;
         return rest;
       },
     },

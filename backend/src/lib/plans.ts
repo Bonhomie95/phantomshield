@@ -1,31 +1,23 @@
 /**
  * Pure plan/billing logic — no DB, so it's unit-testable. Used by the
- * RevenueCat webhook and the referral reward flow.
+ * RevenueCat webhook.
  */
 import { PlanId } from '@/types';
 
-/** Map RevenueCat entitlement identifiers to our highest matching plan. */
+/**
+ * Map RevenueCat entitlement identifiers to our highest matching plan.
+ *
+ * Both the current identifiers (`starter`, `pro`) and the legacy ones
+ * (`guard`, `elite`) are accepted: entitlements already configured in
+ * RevenueCat, and subscriptions bought before the rename, must keep working.
+ */
 export function planFromEntitlements(ids: string[]): PlanId {
-  if (ids.includes('elite')) return 'elite';
-  if (ids.includes('guard')) return 'guard';
+  if (ids.includes('pro') || ids.includes('elite')) return 'pro';
+  if (ids.includes('starter') || ids.includes('guard')) return 'starter';
   return 'free';
 }
 
-export interface PlanState {
-  plan: PlanId;
-  planExpiresAt: Date | null;
-}
-
-/**
- * Grant `days` of Guard on top of the current state — but never downgrade or
- * shorten a user who already has a paid plan. Extends from the later of "now"
- * and the existing expiry so stacked referrals add up.
- */
-export function applyGuardBonus(current: PlanState, days: number, now: Date = new Date()): PlanState {
-  if (current.plan === 'elite' || current.plan === 'guard') return current;
-  const base = current.planExpiresAt && current.planExpiresAt > now ? current.planExpiresAt : now;
-  return {
-    plan: 'guard',
-    planExpiresAt: new Date(base.getTime() + days * 86_400_000),
-  };
+/** The plan actually in force right now, accounting for expiry. */
+export function effectivePlan(plan: PlanId, planExpiresAt: Date | null | undefined): PlanId {
+  return planExpiresAt && planExpiresAt < new Date() ? 'free' : plan;
 }

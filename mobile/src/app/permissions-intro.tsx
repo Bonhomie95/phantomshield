@@ -1,74 +1,120 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Switch } from 'react-native';
 import { router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { Camera } from 'expo-camera';
+import { track } from '@/services/analytics';
 import { Colors, Spacing, FontSize, Radius } from '@/constants/theme';
 import { ShieldLogo } from '@/components/ShieldLogo';
 import { requestNotificationPermissions } from '@/services/notifications';
+import { usePhantomStore } from '@/stores/phantom';
+import { allowFirstRunSetup } from '@/services/pinVault';
 
 // Explain WHY each permission is needed before the OS prompt fires — cold
 // prompts get denied, and denials for a security app are hard to recover from.
-const ITEMS = [
-  {
-    icon: '📸',
-    title: 'Camera',
-    desc: 'Silently captures a photo of whoever enters a wrong PIN or triggers Guard Mode. Asked only the first time it is needed.',
-  },
-  {
-    icon: '📍',
-    title: 'Location',
-    desc: 'Tags intruder and anti-theft events with where your phone was. Only recorded during an actual event, and only if you enable it.',
-  },
-  {
-    icon: '🔔',
-    title: 'Notifications',
-    desc: 'Alerts you the moment an intruder is detected or a remote command runs. We never send marketing.',
-  },
-];
-
+// Each item is a real choice the user makes here, not just a description.
 export default function PermissionsIntroScreen() {
   const [busy, setBusy] = useState(false);
+  const [photos, setPhotos] = useState(true);
+  const [alerts, setAlerts] = useState(true);
 
-  const finish = () => router.replace('/setup-pins');
+  useEffect(() => {
+    void track('permissions_intro_shown');
+  }, []);
+
+  const finish = () => {
+    allowFirstRunSetup();
+    router.replace('/setup-pins');
+  };
 
   const handleContinue = async () => {
     if (busy) return;
     setBusy(true);
-    // Only notifications are requested up front; camera & location are requested
-    // lazily at the exact moment a feature uses them, with this context already seen.
-    await requestNotificationPermissions().catch(() => {});
-    finish();
+    try {
+      if (photos) {
+        const cam = await Camera.requestCameraPermissionsAsync().catch(() => null);
+        const granted = !!cam?.granted;
+        usePhantomStore.getState().setIntruderSnapshotEnabled(granted);
+        void track('permission_result', { permission: 'camera', granted });
+      }
+      if (alerts) {
+        const granted = await requestNotificationPermissions().catch(() => false);
+        void track('permission_result', { permission: 'notifications', granted: !!granted });
+      }
+    } finally {
+      finish();
+    }
   };
 
   return (
     <ScrollView style={s.scroll} contentContainerStyle={s.container} showsVerticalScrollIndicator={false}>
       <View style={s.hero}>
         <ShieldLogo size={56} />
-        <Text style={s.title}>A few permissions</Text>
+        <Text style={s.title} accessibilityRole="header">Choose your protection</Text>
         <Text style={s.sub}>
-          PhantomShield only uses these to protect your device. You are always in control and can
-          change them anytime in Settings.
+          PhantomShield only protects this phone, and only does what you switch on here. You can
+          change any of this later in Settings.
         </Text>
       </View>
 
       <View style={s.list}>
-        {ITEMS.map((it) => (
-          <View key={it.title} style={s.card}>
-            <Text style={s.cardIcon}>{it.icon}</Text>
-            <View style={{ flex: 1 }}>
-              <Text style={s.cardTitle}>{it.title}</Text>
-              <Text style={s.cardDesc}>{it.desc}</Text>
-            </View>
+        <Choice
+          icon="camera-outline"
+          title="Intruder photos"
+          desc="When someone enters a wrong PIN, or moves your phone while Guard Mode is on, the front camera takes a photo for you. Uses the camera."
+          value={photos}
+          onChange={setPhotos}
+        />
+        <Choice
+          icon="notifications-outline"
+          title="Security alerts"
+          desc="Tells you when someone tries to get in, shows Guard Mode is on, and shows lost-mode messages. No marketing, ever. Uses notifications."
+          value={alerts}
+          onChange={setAlerts}
+        />
+        <View style={s.card}>
+          <Ionicons name="location-outline" size={24} color={Colors.primary} />
+          <View style={{ flex: 1 }}>
+            <Text style={s.cardTitle}>Location</Text>
+            <Text style={s.cardDesc}>
+              Off for now. Turn on Find My Phone or location on events in Settings when you want
+              them — we&apos;ll ask then.
+            </Text>
           </View>
-        ))}
+        </View>
       </View>
 
-      <TouchableOpacity style={[s.btn, busy && s.btnDisabled]} onPress={handleContinue} disabled={busy} activeOpacity={0.85}>
-        {busy ? <ActivityIndicator color={Colors.bg} /> : <Text style={s.btnText}>Enable & Continue</Text>}
-      </TouchableOpacity>
-      <TouchableOpacity onPress={finish} style={s.skip} disabled={busy}>
-        <Text style={s.skipText}>Set up later</Text>
+      <TouchableOpacity
+        style={[s.btn, busy && s.btnDisabled]}
+        onPress={handleContinue}
+        disabled={busy}
+        activeOpacity={0.85}
+        accessibilityRole="button"
+      >
+        {busy ? <ActivityIndicator color={Colors.bg} /> : <Text style={s.btnText}>Continue</Text>}
       </TouchableOpacity>
     </ScrollView>
+  );
+}
+
+function Choice({
+  icon, title, desc, value, onChange,
+}: { icon: React.ComponentProps<typeof Ionicons>['name']; title: string; desc: string; value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <View style={s.card}>
+      <Ionicons name={icon} size={24} color={Colors.primary} />
+      <View style={{ flex: 1 }}>
+        <Text style={s.cardTitle}>{title}</Text>
+        <Text style={s.cardDesc}>{desc}</Text>
+      </View>
+      <Switch
+        value={value}
+        onValueChange={onChange}
+        accessibilityLabel={title}
+        trackColor={{ false: Colors.bgBorder, true: Colors.primary + '55' }}
+        thumbColor={value ? Colors.primary : Colors.textMuted}
+      />
+    </View>
   );
 }
 
@@ -76,20 +122,17 @@ const s = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: Colors.bg },
   container: { padding: Spacing.lg, paddingTop: 72, paddingBottom: 40, gap: Spacing.lg },
   hero: { alignItems: 'center', gap: Spacing.sm },
-  title: { fontSize: FontSize.xxl, fontWeight: '800', color: Colors.textPrimary, marginTop: Spacing.sm },
+  title: { fontSize: FontSize.xxl, fontWeight: '800', color: Colors.textPrimary, marginTop: Spacing.sm, textAlign: 'center' },
   sub: { fontSize: FontSize.sm, color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 },
   list: { gap: Spacing.md },
   card: {
-    flexDirection: 'row', gap: Spacing.md, alignItems: 'flex-start',
+    flexDirection: 'row', gap: Spacing.md, alignItems: 'center',
     backgroundColor: Colors.bgCard, borderRadius: Radius.lg, borderWidth: 1,
     borderColor: Colors.bgBorder, padding: Spacing.md,
   },
-  cardIcon: { fontSize: 24, marginTop: 2 },
   cardTitle: { fontSize: FontSize.md, fontWeight: '700', color: Colors.textPrimary },
   cardDesc: { fontSize: FontSize.sm, color: Colors.textSecondary, marginTop: 4, lineHeight: 19 },
   btn: { backgroundColor: Colors.primary, borderRadius: Radius.md, paddingVertical: 16, alignItems: 'center' },
   btnDisabled: { opacity: 0.6 },
   btnText: { fontSize: FontSize.md, fontWeight: '800', color: Colors.bg },
-  skip: { alignItems: 'center', paddingVertical: Spacing.sm },
-  skipText: { fontSize: FontSize.sm, color: Colors.textSecondary },
 });

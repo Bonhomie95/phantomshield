@@ -2,7 +2,7 @@ import { FastifyPluginAsync } from 'fastify';
 import { OAuth2Client }       from 'google-auth-library';
 import appleSignin            from 'apple-signin-auth';
 import { z }                  from 'zod';
-import { User, Device }       from '@/models';
+import { User, Device, RefreshToken } from '@/models';
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -10,8 +10,12 @@ import {
   revokeRefreshToken,
   revokeAllUserTokens,
 } from '@/services/tokenService';
+import crypto                        from 'crypto';
 import { authenticate }              from '@/middleware/auth';
-import { JWTPayload, VerifiedOAuthIdentity, OAuthProvider, PLAN_LIMITS } from '@/types';
+import { blockToken, createWsTicket } from '@/config/kv';
+import { APPLE_BUNDLE_ID, APPLE_SERVICES_ID, exchangeAppleCode } from '@/lib/apple';
+import { JWTPayload, VerifiedOAuthIdentity, PLAN_LIMITS, normalizePlan, AppError } from '@/types';
+import { effectivePlan } from '@/lib/plans';
 
 // ─── Google OAuth client ──────────────────────────────────────────────────────
 
@@ -41,45 +45,59 @@ async function verifyGoogleToken(idToken: string): Promise<VerifiedOAuthIdentity
   const ticket  = await googleClient.verifyIdToken({ idToken, audience });
   const payload = ticket.getPayload();
   if (!payload || !payload.email) throw new Error('Invalid Google token payload.');
+  // Only a provider-verified email may be trusted for account lookup/linking.
+  const emailVerified = payload.email_verified === true;
+  if (!emailVerified) throw new Error('Google email is not verified.');
 
   return {
-    providerId: payload.sub,
-    email:      payload.email,
-    name:       payload.name,
-    photo:      payload.picture,
+    providerId:    payload.sub,
+    email:         payload.email,
+    emailVerified,
+    name:          payload.name,
+    photo:         payload.picture,
   };
 }
 
 async function verifyAppleToken(idToken: string): Promise<VerifiedOAuthIdentity> {
+  // The iOS app's tokens are issued to the bundle id; the web dashboard's to
+  // the Services ID. Accept exactly those two audiences.
   const payload = await appleSignin.verifyIdToken(idToken, {
-    audience:          process.env.APPLE_BUNDLE_ID ?? 'dev.bonhomie95.phantomshield',
+    audience:          [APPLE_BUNDLE_ID, APPLE_SERVICES_ID].filter(Boolean),
     ignoreExpiration:  false,
   });
 
+  // Apple's `email_verified` arrives as a boolean or the string "true".
+  const verified = payload.email_verified === true || payload.email_verified === 'true';
+
   return {
-    providerId: payload.sub,
-    email:      payload.email ?? '', // Apple may omit email after first sign-in
+    providerId:    payload.sub,
+    email:         payload.email || undefined, // Apple may omit email after first sign-in
+    // Only the email inside the signed token is trusted; client-supplied
+    // appleUserData.email is never used for lookup/linking (account takeover).
+    emailVerified: !!payload.email && verified,
   };
 }
 
 // ─── Validation schemas ───────────────────────────────────────────────────────
 
 const DeviceSchema = z.object({
-  deviceId:    z.string().max(128),
+  deviceId:    z.string().min(8).max(128),
   platform:    z.enum(['ios', 'android', 'web']),
-  model:       z.string().optional(),
-  osVersion:   z.string().optional(),
-  appVersion:  z.string().optional(),
-  pushToken:   z.string().optional(),
+  model:       z.string().max(64).optional(),
+  osVersion:   z.string().max(32).optional(),
+  appVersion:  z.string().max(32).optional(),
+  pushToken:   z.string().max(256).optional(),
 });
 
 const OAuthSchema = z.object({
   provider:       z.enum(['google', 'apple']),
   idToken:        z.string().min(20),
   appleUserData:  z.object({
-    email: z.string().email().optional(),
-    name:  z.string().optional(),
+    email: z.string().email().max(254).optional(),
+    name:  z.string().max(128).optional(),
   }).optional(),
+  /** Apple only: one-time code, exchanged for a revocable refresh token. */
+  authorizationCode: z.string().max(2048).optional(),
   device: DeviceSchema,
 });
 
@@ -110,7 +128,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: 'Validation failed', details: parsed.error.flatten() });
     }
 
-    const { provider, idToken, appleUserData, device } = parsed.data;
+    const { provider, idToken, appleUserData, authorizationCode, device } = parsed.data;
 
     // 1. Verify token with the provider — reject anything we can't verify
     let identity: VerifiedOAuthIdentity;
@@ -119,20 +137,29 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         identity = await verifyGoogleToken(idToken);
       } else {
         identity = await verifyAppleToken(idToken);
-        // Apple only sends email on the very first sign-in for a user
+        // Apple only sends email on the very first sign-in for a user. We accept
+        // the client-supplied value ONLY to populate a brand-new account, and it
+        // stays flagged unverified so it can never be used for email-based
+        // linking into an existing account (that path would be takeover).
         if (!identity.email && appleUserData?.email) {
           identity.email = appleUserData.email;
+          identity.emailVerified = false;
         }
         if (!identity.name && appleUserData?.name) {
           identity.name = appleUserData.name;
         }
       }
-    } catch (err: any) {
+    } catch (caught) {
+      const err = caught as AppError;
       request.log.warn({ provider, err: err.message }, 'OAuth token verification failed');
       return reply.code(401).send({ error: 'Token verification failed. Sign in again.' });
     }
 
-    if (!identity.email) {
+    // Google always supplies a verified email. Apple does NOT re-send it after
+    // the first authorisation — so someone who deleted their account and signs
+    // up again arrives with none. The Apple `sub` is a stable identity on its
+    // own, so that account is created without an email rather than refused.
+    if (!identity.email && provider === 'google') {
       return reply.code(422).send({ error: 'Unable to retrieve email from provider.' });
     }
 
@@ -142,27 +169,43 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     // First: look up by provider ID (most accurate — handles email changes)
     let user = await User.findOne({ [providerIdField]: identity.providerId });
 
-    // Second: fall back to email — handles "same person, first time with this provider"
-    if (!user) {
+    // Second: fall back to email — handles "same person, first time with this
+    // provider". Only ever link on a PROVIDER-VERIFIED email; a client-supplied
+    // (unverified) email must never resolve to an existing account.
+    if (!user && identity.emailVerified && identity.email) {
       user = await User.findOne({ email: identity.email });
     }
 
     const isNewUser = !user;
 
     if (!user) {
-      user = await User.create({
-        email:             identity.email,
-        name:              identity.name,   // schema defaults to null when undefined
-        photo:             identity.photo,
-        provider,
-        [providerIdField]: identity.providerId,
-      });
-    } else {
+      // Concurrent first sign-ins can both miss the lookup above; the unique
+      // email/providerId indexes then make one create throw E11000. Upsert
+      // atomically and re-fetch so the loser rides the winner's document.
+      try {
+        user = await User.create({
+          email:             identity.email,
+          name:              identity.name,   // schema defaults to null when undefined
+          photo:             identity.photo,
+          provider,
+          [providerIdField]: identity.providerId,
+        });
+      } catch (caught) {
+        const err = caught as AppError;
+        if (err?.code !== 11000) throw err;
+        user =
+          (await User.findOne({ [providerIdField]: identity.providerId })) ??
+          (identity.emailVerified && identity.email ? await User.findOne({ email: identity.email }) : null);
+        if (!user) throw err;
+      }
+    }
+    if (!isNewUser && user) {
       // Backfill the provider ID if the user signed in before with email/different provider
       if (!user[providerIdField as keyof typeof user]) {
-        (user as any)[providerIdField] = identity.providerId;
+        user.set(providerIdField, identity.providerId);
       }
-      // Keep name/photo fresh from provider
+      // Keep name/photo/email fresh from provider
+      if (identity.email && !user.email && identity.emailVerified) user.email = identity.email;
       if (identity.name  && !user.name)  user.name  = identity.name;
       if (identity.photo && !user.photo) user.photo = identity.photo;
       user.lastLoginAt = new Date();
@@ -176,27 +219,46 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     // 3. Upsert device — scoped to the authenticated user.
     let dev = await Device.findOne({ deviceId: device.deviceId, userId: user._id });
     if (!dev) {
-      // Enforce the plan's device cap before registering a brand-new device.
-      // (This is the real entry point for device creation — the standalone
-      // checkDeviceLimit guard never sees the OAuth flow.)
-      const limit = PLAN_LIMITS[user.plan].devices;
-      const activeCount = await Device.countDocuments({ userId: user._id, isActive: true });
-      if (activeCount >= limit) {
-        return reply.code(403).send({
-          error: 'Device limit reached',
-          message: `Your ${user.plan} plan allows ${limit} device(s). Remove one or upgrade to add this device.`,
-        });
+      // The plan's device cap counts PHONES. A browser session on the web
+      // dashboard is not a protected device, and counting it would lock a free
+      // user out of the one surface they need when their phone is gone.
+      if (device.platform !== 'web') {
+        const limit = PLAN_LIMITS[effectivePlan(normalizePlan(user.plan), user.planExpiresAt)].devices;
+        const phones = await Device.find({ userId: user._id, platform: { $ne: 'web' } })
+          .sort({ lastSeenAt: 1 })
+          .select('deviceId')
+          .lean();
+        // At the cap, sign-in retires the least-recently-seen phone instead of
+        // refusing. Otherwise a reinstall (which mints a new device id on
+        // Android) or a new handset would permanently lock the owner out.
+        const excess = phones.length - limit + 1;
+        if (excess > 0) {
+          const retired = phones.slice(0, excess).map((d) => d.deviceId);
+          await Promise.all([
+            Device.deleteMany({ userId: user._id, deviceId: { $in: retired } }),
+            RefreshToken.updateMany({ userId: user._id, deviceId: { $in: retired } }, { isRevoked: true }),
+          ]);
+          request.log.info({ userId: user.id, retired }, 'Device cap reached — retired oldest device(s)');
+        }
       }
-      // A deviceId is unique per physical install. If it currently belongs to a
-      // different account, the device changed hands — reassign it to the user
-      // who just authenticated (they physically hold the device) instead of
-      // letting a caller who merely knows the id touch another account's record.
-      await Device.deleteOne({ deviceId: device.deviceId, userId: { $ne: user._id } });
+      // deviceId is unique PER USER (compound index), so a fresh install for
+      // this account simply creates its own record; we never touch another
+      // account's device document just because it shares a client-generated id.
       dev = await Device.create({ userId: user._id, ...device });
     } else {
       dev.lastSeenAt = new Date();
       if (device.pushToken) dev.pushToken = device.pushToken;
+      if (device.appVersion) dev.appVersion = device.appVersion;
+      if (device.osVersion) dev.osVersion = device.osVersion;
+      if (device.model) dev.set('model', device.model);
       await dev.save();
+    }
+
+    // Apple: keep a revocable refresh token so account deletion can revoke the
+    // Sign in with Apple authorisation. Best-effort — never blocks sign-in.
+    if (provider === 'apple' && authorizationCode) {
+      const appleRefresh = await exchangeAppleCode(authorizationCode);
+      if (appleRefresh) await User.updateOne({ _id: user._id }, { $set: { appleRefreshToken: appleRefresh } });
     }
 
     // 4. Issue tokens
@@ -209,10 +271,10 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       isNewUser,   // mobile uses this to decide: setup-pins vs biometric-gate
       user: {
         id:        user._id,
-        email:     user.email,
+        email:     user.email ?? null,
         name:      user.name,
         photo:     user.photo,
-        plan:      user.plan,
+        plan:      effectivePlan(normalizePlan(user.plan), user.planExpiresAt),
         provider,
         createdAt: user.createdAt,
       },
@@ -234,11 +296,10 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
     const user   = await User.findById(result.userId);
     const device = await Device.findOne({ deviceId, userId: result.userId });
-    if (!user || !device) {
+    if (!user || !device || !user.isActive) {
       return reply.code(401).send({ error: 'User or device not found.' });
     }
 
-    await revokeRefreshToken(refreshToken);
     const newRefreshToken = await generateRefreshToken(user._id.toString(), deviceId);
     const newAccessToken  = generateAccessToken(fastify, user, device);
 
@@ -248,7 +309,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
   // ── POST /auth/logout ──────────────────────────────────────────────────────
   fastify.post('/logout', { preHandler: [authenticate] }, async (request, reply) => {
     const user = request.user as JWTPayload;
-    const body = request.body as { refreshToken?: string; logoutAll?: boolean };
+    const body = (request.body ?? {}) as { refreshToken?: string; logoutAll?: boolean };
 
     if (body.logoutAll) {
       await revokeAllUserTokens(user.userId);
@@ -256,7 +317,23 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       await revokeRefreshToken(body.refreshToken);
     }
 
+    // Also block THIS access token so it can't be used for its remaining
+    // lifetime (refresh-token revocation alone leaves the access token live).
+    if (user.jti && user.exp) {
+      await blockToken(user.jti, user.exp * 1000).catch(() => {});
+    }
+
     return reply.code(200).send({ message: 'Logged out.' });
+  });
+
+  // ── POST /auth/ws-ticket ─────────────────────────────────────────────────────
+  // Mint a single-use, 30-second ticket for the WebSocket handshake so the client
+  // never has to put a real access token in the WS URL query string.
+  fastify.post('/ws-ticket', { preHandler: [authenticate] }, async (request, reply) => {
+    const user = request.user as JWTPayload;
+    const ticket = crypto.randomBytes(32).toString('hex');
+    await createWsTicket(ticket, { userId: user.userId, deviceId: user.deviceId });
+    return reply.code(200).send({ ticket, expiresIn: 30 });
   });
 };
 

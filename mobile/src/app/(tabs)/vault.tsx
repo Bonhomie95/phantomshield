@@ -10,6 +10,7 @@ import {
   Modal,
 } from 'react-native';
 import { router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import * as Sharing from 'expo-sharing';
 import { usePreventScreenCapture } from 'expo-screen-capture';
 import { shareCatch } from '@/services/share';
@@ -17,35 +18,42 @@ import { usePhantomStore } from '@/stores/phantom';
 import { Card, Badge, Button, SectionHeader, Divider } from '@/components/ui/components';
 import { Colors, Spacing, FontSize, Radius } from '@/constants/theme';
 import { deleteIntruderPhoto, clearAllIntruderPhotos } from '@/services/camera';
+import { exportEvidence, exportReportPdf, ExportResult } from '@/services/export';
+import { track } from '@/services/analytics';
 import { IntruderPhoto } from '@/constants/types';
 
 export default function VaultScreen() {
   // Intruder photos and evidence must not be screenshottable or screen-recordable.
   usePreventScreenCapture('vault');
-  const { intruderPhotos, recentActivity, unlockEvents, unlockedLayers, clearLogs } =
+  const { intruderPhotos, guardEvents, unlockEvents, clearLogs, photoQuotaReached, intruderSnapshotEnabled } =
     usePhantomStore();
   const [preview, setPreview] = useState<IntruderPhoto | null>(null);
-  const isUnlocked = unlockedLayers.includes('vault');
+  const [exporting, setExporting] = useState<'pdf' | 'json' | null>(null);
 
-  if (!isUnlocked) {
-    return (
-      <View style={styles.locked}>
-        <Text style={styles.lockIcon}>🔒</Text>
-        <Text style={styles.lockTitle}>Secure Vault</Text>
-        <Text style={styles.lockSub}>
-          Intruder photos and evidence files are stored here. Enter your Vault PIN.
-        </Text>
-        <Button
-          label="Unlock Vault"
-          onPress={() =>
-            router.push({ pathname: '/pin-gate', params: { layer: 'vault', redirect: '/(tabs)/vault' } })
-          }
-          variant="primary"
-          style={styles.unlockBtn}
-        />
-      </View>
-    );
-  }
+  const handleExport = async (kind: 'pdf' | 'json') => {
+    setExporting(kind);
+    try {
+      const result: ExportResult = kind === 'pdf' ? await exportReportPdf() : await exportEvidence();
+      if (result.ok) {
+        // The share sheet already confirmed it; nothing more to say.
+      } else if (result.reason === 'upgrade_required') {
+        Alert.alert(
+          'Evidence export is a Starter feature',
+          'Upgrade to export a complete, verifiable record of everything captured on this device.',
+          [
+            { text: 'Not now', style: 'cancel' },
+            { text: 'See plans', onPress: () => router.push({ pathname: '/paywall', params: { source: 'vault' } }) },
+          ],
+        );
+      } else if (result.reason === 'empty') {
+        Alert.alert('Nothing to export', 'No events have been recorded on this device yet.');
+      } else {
+        Alert.alert('Export failed', 'The evidence file could not be created. Please try again.');
+      }
+    } finally {
+      setExporting(null);
+    }
+  };
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -56,6 +64,8 @@ export default function VaultScreen() {
         text: 'Delete',
         style: 'destructive',
         onPress: async () => {
+          // An alert can outlive the lock: never act for whoever holds a locked phone.
+          if (!usePhantomStore.getState().isAppUnlocked) return;
           await deleteIntruderPhoto(photo.imageUri);
           // Remove from store
           usePhantomStore.setState((s) => ({
@@ -79,13 +89,15 @@ export default function VaultScreen() {
   const handleClearAll = () => {
     Alert.alert(
       'Clear All Data',
-      'This permanently deletes all activity logs, unlock events, and intruder photos from this device. This cannot be undone.',
+      'This permanently deletes every photo, Guard Mode event and PIN attempt stored on this phone. Anything backed up to your account stays there. This cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Delete Everything',
           style: 'destructive',
           onPress: async () => {
+            // An alert can outlive the lock: never act for whoever holds a locked phone.
+            if (!usePhantomStore.getState().isAppUnlocked) return;
             await clearAllIntruderPhotos();
             clearLogs();
           },
@@ -104,13 +116,10 @@ export default function VaultScreen() {
     charger_disconnected: 'Charger unplugged (Guard Mode)',
     app_switch:           'Another app opened (Guard Mode)',
     disarm_attempt:       'Stop attempt (Guard Mode)',
+    pocket:               'Taken out of a pocket (Guard Mode)',
   };
 
-  const totalScreenTimeSec = recentActivity.reduce((s, e) => s + e.durationSec, 0);
-  const anomalyCount = [
-    ...recentActivity.filter((e) => e.isAnomaly),
-    ...unlockEvents.filter((e) => e.isAnomaly),
-  ].length;
+  const failedPins = unlockEvents.filter((e) => e.isAnomaly).length;
 
   return (
     <>
@@ -121,20 +130,47 @@ export default function VaultScreen() {
       >
         {/* Header */}
         <View style={styles.header}>
-          <Text style={styles.title}>Secure Vault</Text>
-          <Badge label="ENCRYPTED" variant="green" />
+          <Text style={styles.title}>Evidence</Text>
+          {/* Photos live in the app's private sandbox (OS file protection), not
+              app-level encrypted — so the honest label is "PRIVATE", not
+              "ENCRYPTED". The export below is a plain JSON evidence file with an
+              integrity digest; it is deliberately NOT described as encrypted. */}
+          <Badge label="PRIVATE" variant="green" />
         </View>
+
+        {/* The server tells us when it recorded an event but declined to keep
+            the photo. That signal was computed and discarded; surfacing it is
+            both honest (the image is NOT in the cloud) and the single best-timed
+            upgrade prompt in the product. */}
+        {photoQuotaReached && (
+          <TouchableOpacity
+            style={styles.quotaBanner}
+            activeOpacity={0.85}
+            onPress={() => {
+              track('limit_reached_cta', { limit: 'cloud_photos' });
+              router.push({ pathname: '/paywall', params: { source: 'photo_quota' } });
+            }}
+          >
+            <Ionicons name="cloud-offline-outline" size={22} color={Colors.accent} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.quotaTitle}>Monthly photo backup limit reached</Text>
+              <Text style={styles.quotaSub}>
+                New events are still recorded, but their photos stay on this device only — if it&apos;s
+                lost, they&apos;re gone. Upgrade to keep every photo backed up.
+              </Text>
+            </View>
+            <Text style={styles.quotaArrow}>›</Text>
+          </TouchableOpacity>
+        )}
 
         {/* Summary */}
         <Card style={styles.summaryCard}>
           <View style={styles.summaryRow}>
             <SummaryItem value={intruderPhotos.length} label="Photos" accent={intruderPhotos.length > 0} />
             <View style={styles.sep} />
-            <SummaryItem value={anomalyCount} label="Anomalies" accent={anomalyCount > 0} />
+            <SummaryItem value={guardEvents.length} label="Guard events" />
             <View style={styles.sep} />
-            <SummaryItem value={recentActivity.length} label="Events" />
-            <View style={styles.sep} />
-            <SummaryItem value={Math.round(totalScreenTimeSec / 60)} label="Mins" />
+            <SummaryItem value={failedPins} label="Wrong PINs" accent={failedPins > 0} />
           </View>
         </Card>
 
@@ -148,11 +184,12 @@ export default function VaultScreen() {
 
         {intruderPhotos.length === 0 ? (
           <Card style={styles.emptyCard}>
-            <Text style={styles.emptyIcon}>📸</Text>
+            <Ionicons name="camera-outline" size={32} color={Colors.textMuted} />
             <Text style={styles.emptyTitle}>No snapshots yet</Text>
             <Text style={styles.emptyText}>
-              When someone enters the wrong PIN, PhantomShield silently captures a front-camera photo
-              and stores it here.
+              {intruderSnapshotEnabled
+                ? 'When someone enters a wrong PIN or triggers Guard Mode, the photo appears here.'
+                : 'Intruder photos are off. Turn them on in Settings to capture a photo when someone enters a wrong PIN.'}
             </Text>
           </Card>
         ) : (
@@ -188,8 +225,8 @@ export default function VaultScreen() {
         {unlockEvents.length > 0 && (
           <View style={styles.section}>
             <SectionHeader
-              title="Unlock Events"
-              subtitle={`${unlockEvents.filter((e) => e.isAnomaly).length} suspicious`}
+              title="PIN attempts"
+              subtitle={`${failedPins} wrong`}
             />
             <Card>
               {unlockEvents.slice(0, 10).map((ev, i) => (
@@ -210,7 +247,7 @@ export default function VaultScreen() {
                         <Text style={styles.unlockReason}>{ev.anomalyReason}</Text>
                       )}
                     </View>
-                    {ev.isAnomaly && <Text style={{ fontSize: 14 }}>⚠️</Text>}
+                    {ev.isAnomaly && <Ionicons name="warning-outline" size={16} color={Colors.accent} />}
                   </View>
                 </React.Fragment>
               ))}
@@ -223,48 +260,30 @@ export default function VaultScreen() {
 
         {/* Export */}
         <View style={styles.section}>
-          <SectionHeader title="Evidence Export" />
+          <SectionHeader title="Report for police or insurance" />
           <Card style={styles.exportCard}>
             <View style={styles.exportRow}>
-              <Text style={styles.exportIcon}>📄</Text>
+              <Ionicons name="document-text-outline" size={22} color={Colors.primary} />
               <View style={{ flex: 1 }}>
-                <Text style={styles.exportTitle}>PDF Report</Text>
-                <Text style={styles.exportSub}>Timeline, app usage, anomaly flags</Text>
+                <Text style={styles.exportTitle}>Evidence report (PDF)</Text>
+                <Text style={styles.exportSub}>
+                  Every photo with its time, place and a map link, plus a SHA-256 integrity code so
+                  any later change can be detected.
+                </Text>
               </View>
-              <Badge label="FREE" variant="neutral" />
-            </View>
-            <Divider />
-            <View style={styles.exportRow}>
-              <Text style={styles.exportIcon}>🔐</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.exportTitle}>Encrypted .pshield</Text>
-                <Text style={styles.exportSub}>AES-256 with passphrase — Elite only</Text>
-              </View>
-              <Badge label="ELITE" variant="cyan" />
             </View>
             <Button
-              label="Export Logs"
-              onPress={() =>
-                Alert.alert(
-                  'Export Logs',
-                  'Choose export format',
-                  [
-                    {
-                      text: 'PDF Report',
-                      onPress: () =>
-                        Alert.alert('Coming Soon', 'PDF export will be available in the next release.'),
-                    },
-                    {
-                      text: 'Encrypted .pshield',
-                      onPress: () =>
-                        Alert.alert('Upgrade Required', 'Encrypted export requires Phantom Elite.'),
-                    },
-                    { text: 'Cancel', style: 'cancel' },
-                  ],
-                )
-              }
-              variant="secondary"
+              label={exporting === 'pdf' ? 'Preparing…' : 'Create PDF report'}
+              onPress={() => handleExport('pdf')}
+              disabled={!!exporting}
+              variant="primary"
               style={{ marginTop: Spacing.md }}
+            />
+            <Button
+              label={exporting === 'json' ? 'Preparing…' : 'Export raw data (JSON)'}
+              onPress={() => handleExport('json')}
+              disabled={!!exporting}
+              variant="ghost"
             />
           </Card>
         </View>
@@ -275,11 +294,11 @@ export default function VaultScreen() {
           <Card style={styles.dangerCard}>
             <Text style={styles.dangerTitle}>Clear All Data</Text>
             <Text style={styles.dangerSub}>
-              Permanently deletes all activity logs, unlock events, and intruder photos from this
-              device.
+              Permanently deletes every photo, Guard Mode event and PIN attempt stored on this
+              phone.
             </Text>
             <Button
-              label="Clear All Logs"
+              label="Delete evidence on this phone"
               onPress={handleClearAll}
               variant="danger"
               style={{ marginTop: Spacing.md }}
@@ -291,8 +310,8 @@ export default function VaultScreen() {
       {/* Full-screen photo preview modal */}
       <Modal visible={!!preview} transparent animationType="fade" onRequestClose={() => setPreview(null)}>
         <View style={styles.modalBg}>
-          <TouchableOpacity style={styles.modalClose} onPress={() => setPreview(null)}>
-            <Text style={styles.modalCloseText}>✕</Text>
+          <TouchableOpacity style={styles.modalClose} onPress={() => setPreview(null)} accessibilityRole="button" accessibilityLabel="Close photo" hitSlop={12}>
+            <Ionicons name="close" size={26} color={Colors.textSecondary} />
           </TouchableOpacity>
 
           {preview && (
@@ -336,16 +355,16 @@ function SummaryItem({ value, label, accent }: { value: number; label: string; a
 const styles = StyleSheet.create({
   scroll:    { flex: 1, backgroundColor: Colors.bg },
   container: { padding: Spacing.lg, paddingTop: 60, paddingBottom: 48, gap: Spacing.md },
-  locked: {
-    flex: 1, backgroundColor: Colors.bg, alignItems: 'center',
-    justifyContent: 'center', padding: Spacing.xl, gap: Spacing.md,
-  },
-  lockIcon:  { fontSize: 52 },
-  lockTitle: { fontSize: FontSize.xxl, fontWeight: '700', color: Colors.textPrimary },
-  lockSub:   { fontSize: FontSize.sm, color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 },
-  unlockBtn: { width: '80%', marginTop: Spacing.sm },
   header:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: Spacing.sm },
   title:     { fontSize: FontSize.xxl, fontWeight: '700', color: Colors.textPrimary },
+  quotaBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: Colors.accentGlow, borderRadius: Radius.lg,
+    borderWidth: 1, borderColor: Colors.accent + '55', padding: Spacing.md,
+  },
+  quotaTitle: { fontSize: FontSize.sm, fontWeight: '700', color: Colors.textPrimary },
+  quotaSub:   { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 2, lineHeight: 17 },
+  quotaArrow: { fontSize: 22, color: Colors.textSecondary },
   summaryCard: { padding: Spacing.md },
   summaryRow:  { flexDirection: 'row', alignItems: 'center' },
   summaryItem: { flex: 1, alignItems: 'center' },
@@ -353,7 +372,6 @@ const styles = StyleSheet.create({
   summaryLabel:{ fontSize: 10, color: Colors.textSecondary, marginTop: 2 },
   sep: { width: 1, height: 32, backgroundColor: Colors.bgBorder },
   emptyCard:  { alignItems: 'center', padding: Spacing.xl, gap: 8 },
-  emptyIcon:  { fontSize: 32 },
   emptyTitle: { fontSize: FontSize.md, fontWeight: '600', color: Colors.textPrimary },
   emptyText:  { fontSize: FontSize.sm, color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 },
   photoGrid:  { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
@@ -381,7 +399,6 @@ const styles = StyleSheet.create({
   moreLabel:  { fontSize: FontSize.xs, color: Colors.textMuted, textAlign: 'center', paddingVertical: 8 },
   exportCard: { padding: Spacing.md, gap: 12 },
   exportRow:  { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  exportIcon: { fontSize: 20 },
   exportTitle:{ fontSize: FontSize.md, fontWeight: '600', color: Colors.textPrimary },
   exportSub:  { fontSize: FontSize.xs, color: Colors.textSecondary },
   dangerCard: { borderColor: Colors.accent + '44', padding: Spacing.md },
@@ -393,7 +410,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center', padding: Spacing.lg, gap: Spacing.md,
   },
   modalClose:     { position: 'absolute', top: 56, right: 24, zIndex: 10, padding: 8 },
-  modalCloseText: { fontSize: 22, color: Colors.textSecondary },
   modalImage:     { width: '100%', height: 340, borderRadius: Radius.lg },
   modalInfo:      { alignItems: 'center', gap: 4 },
   modalTime:      { fontSize: FontSize.md, fontWeight: '600', color: Colors.textPrimary },

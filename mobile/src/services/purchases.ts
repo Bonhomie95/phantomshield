@@ -1,103 +1,128 @@
 /**
- * In-app purchases via RevenueCat.
+ * In-app subscriptions via RevenueCat.
  *
- * The native module (react-native-purchases) and API keys are optional: this
- * loads the SDK dynamically and no-ops gracefully when it's absent or keys
- * aren't set, so the app builds and runs without billing configured. Set
- * EXPO_PUBLIC_REVENUECAT_IOS_KEY / _ANDROID_KEY and add the package to enable it.
- *
- * app_user_id is set to our backend user id so the RevenueCat webhook can map
- * a purchase back to the right account (see backend/src/routes/billing.ts).
+ * app_user_id is our backend user id, so the RevenueCat webhook can map a
+ * purchase back to the right account (see backend/src/routes/billing.ts).
+ * Entitlement identifiers in RevenueCat must be `starter` and `pro`.
  */
-import { Platform } from 'react-native';
+import { Platform, Linking } from 'react-native';
+import Purchases, {
+  type PurchasesPackage,
+  type CustomerInfo,
+  PURCHASES_ERROR_CODE,
+} from 'react-native-purchases';
+import type { PlanId } from '@phantomshield/shared';
 
 const IOS_KEY = process.env.EXPO_PUBLIC_REVENUECAT_IOS_KEY ?? '';
 const ANDROID_KEY = process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_KEY ?? '';
 
-function apiKey(): string {
-  return Platform.OS === 'ios' ? IOS_KEY : ANDROID_KEY;
-}
+const apiKey = () => (Platform.OS === 'ios' ? IOS_KEY : ANDROID_KEY);
 
-export function isPurchasesConfigured(): boolean {
-  return apiKey().length > 0;
-}
+export const isPurchasesConfigured = (): boolean => apiKey().length > 0;
 
-let mod: any = null;
 let configured = false;
 
-async function load(): Promise<any | null> {
-  if (!isPurchasesConfigured()) return null;
-  if (!mod) {
-    try {
-      // Non-literal specifier keeps TS from requiring the module at build time.
-      const spec = 'react-native-purchases';
-      const imported = await import(spec);
-      mod = imported.default ?? imported;
-    } catch {
-      return null;
-    }
-  }
-  return mod;
-}
-
+/** Configure once, then switch identity on later sign-ins. */
 export async function configurePurchases(userId: string): Promise<boolean> {
-  const P = await load();
-  if (!P) return false;
+  if (!isPurchasesConfigured()) return false;
   try {
     if (!configured) {
-      P.configure({ apiKey: apiKey(), appUserID: userId });
+      Purchases.configure({ apiKey: apiKey(), appUserID: userId });
       configured = true;
     } else {
-      await P.logIn(userId);
+      await Purchases.logIn(userId);
     }
     return true;
   } catch {
     return false;
   }
+}
+
+/** Forget the signed-in customer (sign-out / account deletion). */
+export async function resetPurchases(): Promise<void> {
+  if (!configured) return;
+  await Purchases.logOut().catch(() => {});
+}
+
+/** Highest plan the customer's active entitlements grant. */
+export function planFromCustomer(info: CustomerInfo | null | undefined): PlanId {
+  const active = Object.keys(info?.entitlements.active ?? {});
+  if (active.includes('pro') || active.includes('elite')) return 'pro';
+  if (active.includes('starter') || active.includes('guard')) return 'starter';
+  return 'free';
 }
 
 export interface PlanOffer {
-  id: string;
+  tier: 'starter' | 'pro';
   title: string;
+  /** Localised store price, e.g. "$2.99". */
   price: string;
-  pkg: unknown;
+  /** e.g. "month", "year". */
+  period: string;
+  pkg: PurchasesPackage;
 }
 
-export async function getOffers(): Promise<PlanOffer[]> {
-  const P = await load();
-  if (!P) return [];
+const PERIOD: Record<string, string> = {
+  P1W: 'week', P1M: 'month', P3M: '3 months', P6M: '6 months', P1Y: 'year',
+};
+
+/** The current offering's packages mapped to our tiers by product/package id. */
+export async function getOffers(): Promise<PlanOffer[] | null> {
+  if (!configured) return null;
   try {
-    const offerings = await P.getOfferings();
-    const pkgs = offerings?.current?.availablePackages ?? [];
-    return pkgs.map((pkg: any) => ({
-      id: pkg.identifier,
-      title: pkg.product?.title ?? pkg.identifier,
-      price: pkg.product?.priceString ?? '',
-      pkg,
-    }));
+    const offerings = await Purchases.getOfferings();
+    const pkgs = offerings.current?.availablePackages ?? [];
+    const out: PlanOffer[] = [];
+    for (const pkg of pkgs) {
+      const id = `${pkg.identifier} ${pkg.product.identifier}`.toLowerCase();
+      const tier = id.includes('pro') ? 'pro' : id.includes('starter') ? 'starter' : null;
+      if (!tier || out.some((o) => o.tier === tier)) continue;
+      out.push({
+        tier,
+        title: pkg.product.title,
+        price: pkg.product.priceString,
+        period: PERIOD[pkg.product.subscriptionPeriod ?? ''] ?? 'month',
+        pkg,
+      });
+    }
+    return out;
   } catch {
-    return [];
+    return null;
   }
 }
 
-export async function purchase(pkg: unknown): Promise<boolean> {
-  const P = await load();
-  if (!P) return false;
+export type PurchaseResult =
+  | { status: 'ok'; plan: PlanId }
+  | { status: 'cancelled' }
+  | { status: 'error'; message: string };
+
+export async function purchase(pkg: PurchasesPackage): Promise<PurchaseResult> {
   try {
-    await P.purchasePackage(pkg);
-    return true;
-  } catch {
-    return false;
+    const { customerInfo } = await Purchases.purchasePackage(pkg);
+    return { status: 'ok', plan: planFromCustomer(customerInfo) };
+  } catch (err: any) {
+    if (err?.userCancelled || err?.code === PURCHASES_ERROR_CODE.PURCHASE_CANCELLED_ERROR) {
+      return { status: 'cancelled' };
+    }
+    return { status: 'error', message: err?.message ?? 'The purchase could not be completed.' };
   }
 }
 
-export async function restorePurchases(): Promise<boolean> {
-  const P = await load();
-  if (!P) return false;
+/** Restore; resolves to the plan the restored entitlements grant (or null on failure). */
+export async function restorePurchases(): Promise<PlanId | null> {
+  if (!configured) return null;
   try {
-    await P.restorePurchases();
-    return true;
+    return planFromCustomer(await Purchases.restorePurchases());
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** Open the platform's own subscription management screen. */
+export async function manageSubscription(): Promise<void> {
+  const url =
+    Platform.OS === 'ios'
+      ? 'https://apps.apple.com/account/subscriptions'
+      : 'https://play.google.com/store/account/subscriptions';
+  await Linking.openURL(url).catch(() => {});
 }

@@ -1,41 +1,67 @@
 'use client';
 import { useEffect, useRef, useCallback, useState } from 'react';
-import Cookies from 'js-cookie';
+import { getDeviceId } from '@/lib/deviceId';
+import type { WSMessage } from '@phantomshield/shared';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3002/ws';
 
-export type WSEvent =
-  | { type: 'activity_event'; payload: Record<string, unknown> }
-  | { type: 'intruder_alert'; payload: Record<string, unknown> }
-  | { type: 'anomaly_alert'; payload: Record<string, unknown> }
-  | { type: 'device_locked'; payload: Record<string, unknown> }
-  | { type: 'device_wipe_logs'; payload: Record<string, unknown> }
-  | { type: 'connected'; payload: Record<string, unknown> }
-  | { type: 'ping'; payload: Record<string, unknown> };
+// Re-export the shared wire type so consumers keep a single source of truth.
+export type WSEvent = WSMessage;
 
 type EventHandler = (event: WSEvent) => void;
+export type WsStatus = 'connecting' | 'connected' | 'disconnected';
+
+const RECONNECT_MS = 5000;
 
 export const useWebSocket = (onEvent?: EventHandler) => {
-  const wsRef       = useRef<WebSocket | null>(null);
-  const handlersRef = useRef<EventHandler[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const handlerRef = useRef<EventHandler | undefined>(onEvent);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disposedRef = useRef(false);
+  const [status, setStatus] = useState<WsStatus>('connecting');
 
-  if (onEvent && !handlersRef.current.includes(onEvent)) {
-    handlersRef.current.push(onEvent);
-  }
+  // Always call the latest handler without re-subscribing the socket.
+  useEffect(() => { handlerRef.current = onEvent; }, [onEvent]);
 
-  const connect = useCallback(() => {
-    const token = Cookies.get('ps_access_token');
-    if (!token) return;
+  const scheduleReconnect = useCallback((connect: () => void) => {
+    if (disposedRef.current) return;
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    reconnectTimer.current = setTimeout(connect, RECONNECT_MS);
+  }, []);
 
-    const url = `${WS_URL}?token=${encodeURIComponent(token)}&deviceId=dashboard`;
-    const ws  = new WebSocket(url);
+  const connect = useCallback(async () => {
+    if (disposedRef.current) return;
+    // Don't open a second socket (StrictMode double-mount / overlapping reconnect).
+    const existing = wsRef.current;
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    setStatus('connecting');
+    const deviceId = getDeviceId();
+    let ticket: string | undefined;
+    try {
+      const res = await fetch(`/api/auth/ws-ticket?deviceId=${encodeURIComponent(deviceId)}`, {
+        credentials: 'include',
+      });
+      if (res.ok) ticket = (await res.json()).ticket;
+    } catch {
+      /* fall through to retry */
+    }
+    if (disposedRef.current) return;
+    if (!ticket) {
+      setStatus('disconnected');
+      scheduleReconnect(connect);
+      return;
+    }
+
+    const url = `${WS_URL}?ticket=${encodeURIComponent(ticket)}&deviceId=${encodeURIComponent(deviceId)}`;
+    const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setIsConnected(true);
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (disposedRef.current) { ws.close(); return; }
+      setStatus('connected');
     };
 
     ws.onmessage = (e) => {
@@ -45,26 +71,35 @@ export const useWebSocket = (onEvent?: EventHandler) => {
           ws.send(JSON.stringify({ type: 'pong', payload: {}, timestamp: Date.now() }));
           return;
         }
-        handlersRef.current.forEach(h => h(msg));
-      } catch { /* ignore */ }
+        handlerRef.current?.(msg);
+      } catch { /* ignore malformed */ }
     };
 
     ws.onclose = () => {
-      setIsConnected(false);
-      // Reconnect after 5 seconds
-      reconnectTimer.current = setTimeout(connect, 5000);
+      if (disposedRef.current) return;
+      setStatus('disconnected');
+      scheduleReconnect(connect);
     };
 
     ws.onerror = () => ws.close();
-  }, []);
+  }, [scheduleReconnect]);
 
   useEffect(() => {
+    disposedRef.current = false;
     connect();
     return () => {
-      wsRef.current?.close();
+      // Tear down for good: block any pending reconnect and detach handlers so a
+      // late onclose can't schedule a new connection after unmount.
+      disposedRef.current = true;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      const ws = wsRef.current;
+      if (ws) {
+        ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+        ws.close();
+        wsRef.current = null;
+      }
     };
   }, [connect]);
 
-  return { isConnected };
+  return { status, isConnected: status === 'connected' };
 };

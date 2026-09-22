@@ -12,7 +12,8 @@ const pushRoutes: FastifyPluginAsync = async (fastify) => {
     const user   = request.user as JWTPayload;
     const schema = z.object({
       pushToken: z.string().min(1).max(256),
-      deviceId:  z.string().min(1),
+      // Accepted for older clients but ignored: the token's own device is used.
+      deviceId:  z.string().max(128).optional(),
     });
 
     const parsed = schema.safeParse(request.body);
@@ -20,10 +21,10 @@ const pushRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: 'Invalid payload' });
     }
 
-    const { pushToken, deviceId } = parsed.data;
+    const { pushToken } = parsed.data;
 
     await Device.updateOne(
-      { deviceId, userId: user.userId },
+      { deviceId: user.deviceId, userId: user.userId },
       { $set: { pushToken, lastSeenAt: new Date() } }
     );
 
@@ -43,7 +44,10 @@ const pushRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // ── POST /push/test — send test notification ──────────────────────
-  fastify.post('/test', { preHandler: [authenticate] }, async (request, reply) => {
+  fastify.post('/test', {
+    preHandler: [authenticate],
+    config: { rateLimit: { max: 5, timeWindow: 60_000 } },
+  }, async (request, reply) => {
     const user = request.user as JWTPayload;
 
     await sendPushToUser(
@@ -54,28 +58,6 @@ const pushRoutes: FastifyPluginAsync = async (fastify) => {
     );
 
     return reply.code(200).send({ message: 'Test notification sent.' });
-  });
-
-  // ── POST /push/send — server-triggered push (internal use / webhooks)
-  fastify.post('/send', {
-    preHandler: [authenticate],
-    config: { rateLimit: { max: 5, timeWindow: 60_000 } },
-  }, async (request, reply) => {
-    const user   = request.user as JWTPayload;
-    const schema = z.object({
-      title: z.string().max(100),
-      body:  z.string().max(300),
-      data:  z.record(z.string(), z.unknown()).optional(),
-    });
-
-    const parsed = schema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid payload' });
-    }
-
-    await sendPushToUser(user.userId, parsed.data.title, parsed.data.body, parsed.data.data ?? {});
-
-    return reply.code(200).send({ message: 'Notification queued.' });
   });
 };
 

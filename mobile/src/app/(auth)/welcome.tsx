@@ -11,8 +11,10 @@ import {
   TouchableOpacity,
 } from "react-native";
 import { router } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
 import {
   GoogleSignin,
+  GoogleSigninButton,
   statusCodes,
 } from "@react-native-google-signin/google-signin";
 import * as AppleAuthentication from "expo-apple-authentication";
@@ -25,41 +27,50 @@ import { oauthSignIn, storeTokens, getOrCreateDeviceId } from "@/services/api";
 import { usePhantomStore } from "@/stores/phantom";
 import { track } from "@/services/analytics";
 
-// Configure Google Sign-In once at module level.
-// Only the webClientId is required — it tells Google which server to issue tokens for.
+// Configure Google Sign-In once at module level. The webClientId is the
+// audience the backend verifies the ID token against.
 GoogleSignin.configure({
   webClientId: GOOGLE.webClientId,
   iosClientId: GOOGLE.iosClientId,
-
-  offlineAccess: true, // gets a serverAuthCode your backend can exchange for tokens
   scopes: ["profile", "email"],
 });
 
-const FEATURES = [
+/** Model / OS shown in the device list, so owners can tell their phones apart. */
+const deviceMeta = () => ({
+  model:
+    Platform.OS === "android"
+      ? String((Platform.constants as { Model?: string }).Model ?? "Android phone").slice(0, 64)
+      : "iPhone",
+  osVersion: String(Platform.Version).slice(0, 32),
+});
+
+const FEATURES: { icon: React.ComponentProps<typeof Ionicons>["name"]; title: string; desc: string }[] = [
   {
-    icon: "🕵️",
-    title: "Silent Monitoring",
-    desc: "Tracks app usage and anomalies — only when you enable it.",
+    icon: "shield-half-outline",
+    title: "Guard Mode",
+    desc: "On a table, charging, or in your pocket — know the moment someone takes your phone, with a photo, time and place.",
   },
   {
-    icon: "🔐",
-    title: "Multi-Layer PINs",
-    desc: "Separate PINs for logs, vault, and settings. Plus a decoy PIN.",
+    icon: "people-outline",
+    title: "Guardians",
+    desc: "If your SIM is swapped or Guard Mode goes off, someone you trust gets a live location link.",
   },
   {
-    icon: "📸",
-    title: "Intruder Snapshots",
-    desc: "Wrong PIN attempts silently capture the front camera.",
+    icon: "help-buoy-outline",
+    title: "Lost mode",
+    desc: "Put “call me” on your lost phone’s lock screen, find it on a map, or sound an alarm from any browser.",
   },
   {
-    icon: "🌐",
-    title: "Remote Dashboard",
-    desc: "View activity and lock tracking from any browser.",
+    icon: "document-text-outline",
+    title: "Evidence report",
+    desc: "A PDF with photos, times and places, ready for the police or your insurer.",
   },
 ];
 
 export default function WelcomeScreen() {
   const { setUser, setAuthenticated } = usePhantomStore();
+  // Opened from inside the app to add an account to a phone already set up.
+  const linking = usePhantomStore((st) => st.onboarded);
   const [loading, setLoading] = useState<"google" | "apple" | null>(null);
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -78,13 +89,14 @@ export default function WelcomeScreen() {
         useNativeDriver: true,
       }),
     ]).start();
-  }, []);
+  }, [fadeAnim, slideAnim]);
 
   // ── Shared post-verification flow ──────────────────────────────────────────
   const handleOAuthSuccess = async (
     provider: "google" | "apple",
     idToken: string,
     appleUserData?: { email?: string; name?: string },
+    authorizationCode?: string,
   ) => {
     try {
       const deviceId = await getOrCreateDeviceId();
@@ -92,10 +104,12 @@ export default function WelcomeScreen() {
         provider,
         idToken,
         appleUserData,
+        authorizationCode,
         device: {
           deviceId,
           platform: Platform.OS as "ios" | "android",
           appVersion: Constants.expoConfig?.version ?? "1.0.0",
+          ...deviceMeta(),
         },
       });
       await storeTokens(result.accessToken, result.refreshToken);
@@ -105,9 +119,10 @@ export default function WelcomeScreen() {
         result.isNewUser ??
         Date.now() - new Date(result.user.createdAt).getTime() < 10_000;
       track(isNew ? "sign_up" : "sign_in", { provider });
-      // New users see the permission explainer (which leads to PIN setup);
-      // returning users go straight to the biometric gate.
-      router.replace(isNew ? "/permissions-intro" : "/biometric-gate");
+      // A phone already set up goes back into the app; otherwise set it up.
+      const st = usePhantomStore.getState();
+      if (st.onboarded) router.replace(st.isAppUnlocked ? "/(tabs)" : "/biometric-gate");
+      else router.replace("/permissions-intro");
     } catch (err: any) {
       Alert.alert(
         "Sign-In Failed",
@@ -121,10 +136,7 @@ export default function WelcomeScreen() {
   // ── Google Sign-In ─────────────────────────────────────────────────────────
   const handleGoogleSignIn = async () => {
     if (!GOOGLE.webClientId) {
-      Alert.alert(
-        "Not Configured",
-        "Add EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID to your .env file.\nSee src/constants/config.ts for instructions.",
-      );
+      Alert.alert("Google sign-in unavailable", "Please try again later.");
       return;
     }
 
@@ -182,10 +194,12 @@ export default function WelcomeScreen() {
           .filter(Boolean)
           .join(" ") || undefined;
 
-      await handleOAuthSuccess("apple", credential.identityToken, {
-        email: credential.email ?? undefined,
-        name,
-      });
+      await handleOAuthSuccess(
+        "apple",
+        credential.identityToken,
+        { email: credential.email ?? undefined, name },
+        credential.authorizationCode ?? undefined,
+      );
     } catch (err: any) {
       if (err.code !== "ERR_REQUEST_CANCELED") {
         Alert.alert("Apple Sign-In Failed", err.message ?? "Please try again.");
@@ -213,56 +227,67 @@ export default function WelcomeScreen() {
       >
         <ShieldLogo size={72} />
         <Text style={styles.brand}>PhantomShield</Text>
-        <Text style={styles.tagline}>Your phone. Your eyes. Always.</Text>
+        <Text style={styles.tagline}>
+          {linking ? "Sign in to back up evidence and find this phone from anywhere." : "Know if anyone takes your phone."}
+        </Text>
       </Animated.View>
 
       {/* ── Auth buttons — above the fold so nobody has to hunt for them ── */}
       <View style={styles.authSection}>
-        {/* Google */}
-        <TouchableOpacity
-          style={[styles.oauthBtn, disabled && styles.oauthBtnDisabled]}
-          onPress={handleGoogleSignIn}
-          disabled={disabled}
-          activeOpacity={0.75}
-        >
-          <View style={[styles.oauthIconBox, { backgroundColor: "#fff" }]}>
-            {loading === "google" ? (
-              <ActivityIndicator size="small" color="#4285F4" />
-            ) : (
-              <Text style={[styles.oauthIconLetter, { color: "#4285F4" }]}>
-                G
-              </Text>
-            )}
-          </View>
-          <Text style={styles.oauthLabel}>
-            {loading === "google" ? "Signing in…" : "Continue with Google"}
-          </Text>
-        </TouchableOpacity>
-
-        {/* Apple — iOS only */}
+        {/* Apple first on iOS (HIG), then Google — both official buttons. */}
         {Platform.OS === "ios" && (
-          <AppleAuthentication.AppleAuthenticationButton
-            buttonType={
-              AppleAuthentication.AppleAuthenticationButtonType.CONTINUE
-            }
-            buttonStyle={
-              AppleAuthentication.AppleAuthenticationButtonStyle.BLACK
-            }
-            cornerRadius={Radius.md}
-            style={[styles.appleBtn, disabled && styles.oauthBtnDisabled]}
-            onPress={handleAppleSignIn}
-          />
+          <View pointerEvents={disabled ? "none" : "auto"} style={disabled && styles.oauthBtnDisabled}>
+            <AppleAuthentication.AppleAuthenticationButton
+              buttonType={AppleAuthentication.AppleAuthenticationButtonType.CONTINUE}
+              buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.WHITE}
+              cornerRadius={Radius.md}
+              style={styles.appleBtn}
+              onPress={handleAppleSignIn}
+            />
+          </View>
         )}
 
-        {/* Value moment — let people feel the product before signing up. */}
-        <TouchableOpacity
-          style={styles.tryBtn}
-          onPress={() => router.push("/guard-mode")}
+        <GoogleSigninButton
+          size={GoogleSigninButton.Size.Wide}
+          color={GoogleSigninButton.Color.Dark}
+          onPress={handleGoogleSignIn}
           disabled={disabled}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.tryText}>🛡  Try Guard Mode — no account needed</Text>
-        </TouchableOpacity>
+          style={[styles.googleBtn, disabled && styles.oauthBtnDisabled]}
+        />
+
+        {loading && (
+          <View style={styles.loadingRow} accessibilityLiveRegion="polite">
+            <ActivityIndicator size="small" color={Colors.primary} />
+            <Text style={styles.loadingText}>Signing you in…</Text>
+          </View>
+        )}
+
+        {linking ? (
+          <TouchableOpacity style={styles.tryBtn} onPress={() => router.back()} disabled={disabled} activeOpacity={0.8}>
+            <Text style={styles.tryText}>Not now</Text>
+          </TouchableOpacity>
+        ) : (
+          <>
+            {/* An account is optional: everything on the phone works without one. */}
+            <TouchableOpacity
+              style={styles.tryBtn}
+              onPress={() => router.push("/permissions-intro")}
+              disabled={disabled}
+              activeOpacity={0.8}
+              accessibilityRole="button"
+            >
+              <Text style={styles.tryText}>Continue without an account</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.linkBtn}
+              onPress={() => router.push("/guard-mode")}
+              disabled={disabled}
+              accessibilityRole="button"
+            >
+              <Text style={styles.linkText}>Just try Guard Mode</Text>
+            </TouchableOpacity>
+          </>
+        )}
       </View>
 
       {/* Feature cards — informational, fine below the fold */}
@@ -275,7 +300,7 @@ export default function WelcomeScreen() {
               { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
             ]}
           >
-            <Text style={styles.featureIcon}>{f.icon}</Text>
+            <Ionicons name={f.icon} size={22} color={Colors.primary} style={styles.featureIcon} />
             <View style={{ flex: 1 }}>
               <Text style={styles.featureTitle}>{f.title}</Text>
               <Text style={styles.featureDesc}>{f.desc}</Text>
@@ -286,11 +311,12 @@ export default function WelcomeScreen() {
 
       {/* Transparency notice */}
       <View style={styles.notice}>
-        <Text style={{ fontSize: 16, marginTop: 1 }}>ℹ️</Text>
+        <Ionicons name="information-circle-outline" size={18} color={Colors.primary} />
         <Text style={styles.noticeText}>
-          PhantomShield only monitors{" "}
-          <Text style={{ color: Colors.primary }}>your own device</Text>. You
-          are always aware and in control. Nothing runs without your activation.
+          PhantomShield protects{" "}
+          <Text style={{ color: Colors.primary }}>this phone, for its owner</Text>.
+          Nothing is recorded until you switch it on, and you can see and delete
+          everything it keeps.
         </Text>
       </View>
 
@@ -298,6 +324,7 @@ export default function WelcomeScreen() {
         By continuing you agree to our{" "}
         <Text
           style={{ color: Colors.primary }}
+          accessibilityRole="link"
           onPress={() => WebBrowser.openBrowserAsync(LEGAL.terms)}
         >
           Terms of Service
@@ -305,6 +332,7 @@ export default function WelcomeScreen() {
         and{" "}
         <Text
           style={{ color: Colors.primary }}
+          accessibilityRole="link"
           onPress={() => WebBrowser.openBrowserAsync(LEGAL.privacy)}
         >
           Privacy Policy
@@ -349,7 +377,7 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
     gap: Spacing.md,
   },
-  featureIcon: { fontSize: 22, marginTop: 2 },
+  featureIcon: { marginTop: 2 },
   featureTitle: {
     fontSize: FontSize.md,
     fontWeight: "600",
@@ -382,35 +410,11 @@ const styles = StyleSheet.create({
 
   authSection: { gap: 12, marginBottom: Spacing.lg },
 
-  oauthBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: Colors.bgCard,
-    borderRadius: Radius.md,
-    borderWidth: 1,
-    borderColor: Colors.bgBorder,
-    paddingVertical: 14,
-    paddingHorizontal: Spacing.md,
-    gap: 12,
-  },
   oauthBtnDisabled: { opacity: 0.5 },
-  oauthIconBox: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  oauthIconLetter: { fontSize: 16, fontWeight: "800" },
-  oauthLabel: {
-    flex: 1,
-    textAlign: "center",
-    fontSize: FontSize.md,
-    fontWeight: "600",
-    color: Colors.textPrimary,
-  },
-
   appleBtn: { width: "100%", height: 52 },
+  googleBtn: { width: "100%", height: 52 },
+  loadingRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  loadingText: { fontSize: FontSize.sm, color: Colors.textSecondary },
 
   tryBtn: {
     borderWidth: 1,
@@ -425,6 +429,8 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: Colors.primary,
   },
+  linkBtn: { alignItems: "center", paddingVertical: 6 },
+  linkText: { fontSize: FontSize.sm, color: Colors.textSecondary },
   legal: {
     textAlign: "center",
     fontSize: FontSize.xs,

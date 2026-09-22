@@ -1,0 +1,160 @@
+name: CI
+
+# Every push and PR must prove the whole monorepo still typechecks, lints,
+# tests and builds. Before this existed nothing verified anything: the
+# production backend build was broken for an unknown length of time because
+# `tsc` emitted unresolved path aliases and no pipeline ever ran `node dist`.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  # A new push supersedes an in-flight run for the same ref.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ── Workspaces: shared, backend, dashboard ──────────────────────────────────
+  build:
+    name: Typecheck · Lint · Test · Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # MongoDB is the backend's only datastore; the state/storage integration
+    # tests run against a real instance.
+    services:
+      mongo:
+        image: mongo:7
+        ports: ['27017:27017']
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build:shared
+
+      # packages/shared ships its compiled dist so the mobile `file:` dependency
+      # resolves without a build step. If dist drifts from src, mobile builds
+      # against stale types — so the pipeline, not a human, verifies it.
+      - name: Verify committed shared dist is in sync with src
+        run: |
+          if ! git diff --quiet -- packages/shared/dist; then
+            echo "::error::packages/shared/dist is out of sync with src. Run 'npm run build:shared' and commit the result."
+            git --no-pager diff --stat -- packages/shared/dist
+            exit 1
+          fi
+
+      - name: Typecheck (shared, backend, dashboard)
+        run: npm run typecheck --workspaces --if-present
+
+      - name: Lint
+        run: npm run lint --workspaces --if-present
+
+      - name: Test
+        run: npm run test --workspaces --if-present
+        env:
+          MONGODB_TEST_URI: mongodb://127.0.0.1:27017
+          REDIS_TEST_URL: redis://127.0.0.1:6379/15
+
+      - name: Build backend
+        run: npm run build --workspace phantomshield-backend
+
+      # The bug that motivated this pipeline: `tsc` leaves `require("@/models")`
+      # in the output, which only fails at runtime. Assert the built artifact
+      # actually loads far enough to reach env validation.
+      - name: Smoke-test the backend build (module resolution)
+        run: |
+          set -e
+          if grep -rq 'require("@/' backend/dist; then
+            echo "::error::Unresolved '@/' path aliases in backend/dist — tsc-alias did not run."
+            exit 1
+          fi
+          OUT=$(node -e "
+            process.env.JWT_SECRET='x'.repeat(40);
+            delete process.env.MONGODB_URI;
+            try { require('./backend/dist/index.js'); } catch (e) {
+              if (e.code === 'MODULE_NOT_FOUND') { console.error('MODULE_NOT_FOUND: ' + e.message); process.exit(1); }
+            }
+          " 2>&1 || true)
+          echo "$OUT"
+          if echo "$OUT" | grep -q "MODULE_NOT_FOUND"; then
+            echo "::error::backend/dist failed to load."
+            exit 1
+          fi
+
+      - name: Build dashboard
+        run: npm run build --workspace phantomshield-dashboard
+        env:
+          # The BFF throws at import time in production without a backend URL.
+          API_URL: http://localhost:3002/api
+          NEXT_PUBLIC_API_URL: http://localhost:3002/api
+
+  # ── Mobile is a standalone install (intentionally not a workspace) ──────────
+  mobile:
+    name: Mobile · Typecheck · Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # Mobile links @phantomshield/shared via a file: dependency, so the
+      # workspace must be installed and built first.
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build:shared
+
+      - name: Install mobile dependencies
+        run: npm --prefix mobile ci
+
+      - name: Typecheck
+        run: npm --prefix mobile run typecheck
+
+      - name: Lint
+        run: npm --prefix mobile run lint
+
+  # ── Supply chain ────────────────────────────────────────────────────────────
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      # Advisory, not blocking: known criticals currently require major
+      # framework upgrades (see docs/AUDIT.md §7). This surfaces regressions
+      # without wedging the pipeline on pre-existing debt.
+      - name: npm audit (critical only)
+        run: npm audit --audit-level=critical || echo "::warning::npm audit reported issues — review before release."

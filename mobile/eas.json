@@ -6,16 +6,75 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "channel": "development",
+      "env": {
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
+        "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "119391523094-dvgt1jdlc25tib2d341gahoi90luqi62.apps.googleusercontent.com",
+        "EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID": "119391523094-10al3p2cdaid85r958vp8033en9u0g7i.apps.googleusercontent.com",
+        "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "119391523094-2heictk72mh945pborish3nvspa474hs.apps.googleusercontent.com",
+        "EXPO_PUBLIC_REVENUECAT_IOS_KEY": "",
+        "EXPO_PUBLIC_REVENUECAT_ANDROID_KEY": "",
+        "EXPO_PUBLIC_POSTHOG_KEY": "phc_CfQkYj5Cessjqf3kCA9udzx6qPzowixJfuNJdZi6SecF",
+        "EXPO_PUBLIC_POSTHOG_HOST": "https://us.i.posthog.com",
+        "EXPO_PUBLIC_API_URL": "https://phantomshield-api.onrender.com/api",
+        "EXPO_PUBLIC_DASHBOARD_URL": "https://phantomshield-web.onrender.com",
+        "EXPO_PUBLIC_TERMS_URL": "https://phantomshield-web.onrender.com/terms",
+        "EXPO_PUBLIC_PRIVACY_URL": "https://phantomshield-web.onrender.com/privacy",
+        "EXPO_PUBLIC_SUPPORT_URL": "https://phantomshield-web.onrender.com/support"
+      }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "channel": "preview",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
+        "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "119391523094-dvgt1jdlc25tib2d341gahoi90luqi62.apps.googleusercontent.com",
+        "EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID": "119391523094-10al3p2cdaid85r958vp8033en9u0g7i.apps.googleusercontent.com",
+        "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "119391523094-2heictk72mh945pborish3nvspa474hs.apps.googleusercontent.com",
+        "EXPO_PUBLIC_REVENUECAT_IOS_KEY": "",
+        "EXPO_PUBLIC_REVENUECAT_ANDROID_KEY": "",
+        "EXPO_PUBLIC_POSTHOG_KEY": "phc_CfQkYj5Cessjqf3kCA9udzx6qPzowixJfuNJdZi6SecF",
+        "EXPO_PUBLIC_POSTHOG_HOST": "https://us.i.posthog.com",
+        "EXPO_PUBLIC_API_URL": "https://phantomshield-api.onrender.com/api",
+        "EXPO_PUBLIC_DASHBOARD_URL": "https://phantomshield-web.onrender.com",
+        "EXPO_PUBLIC_TERMS_URL": "https://phantomshield-web.onrender.com/terms",
+        "EXPO_PUBLIC_PRIVACY_URL": "https://phantomshield-web.onrender.com/privacy",
+        "EXPO_PUBLIC_SUPPORT_URL": "https://phantomshield-web.onrender.com/support"
+      }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "channel": "production",
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "env": {
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
+        "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "119391523094-dvgt1jdlc25tib2d341gahoi90luqi62.apps.googleusercontent.com",
+        "EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID": "119391523094-10al3p2cdaid85r958vp8033en9u0g7i.apps.googleusercontent.com",
+        "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "119391523094-2heictk72mh945pborish3nvspa474hs.apps.googleusercontent.com",
+        "EXPO_PUBLIC_REVENUECAT_IOS_KEY": "",
+        "EXPO_PUBLIC_REVENUECAT_ANDROID_KEY": "",
+        "EXPO_PUBLIC_POSTHOG_KEY": "phc_CfQkYj5Cessjqf3kCA9udzx6qPzowixJfuNJdZi6SecF",
+        "EXPO_PUBLIC_POSTHOG_HOST": "https://us.i.posthog.com",
+        "EXPO_PUBLIC_API_URL": "https://phantomshield-api.onrender.com/api",
+        "EXPO_PUBLIC_DASHBOARD_URL": "https://phantomshield-web.onrender.com",
+        "EXPO_PUBLIC_TERMS_URL": "https://phantomshield-web.onrender.com/terms",
+        "EXPO_PUBLIC_PRIVACY_URL": "https://phantomshield-web.onrender.com/privacy",
+        "EXPO_PUBLIC_SUPPORT_URL": "https://phantomshield-web.onrender.com/support"
+      }
     }
   },
   "submit": {
-    "production": {}
+    "production": {
+      "android": {
+        "track": "internal",
+        "releaseStatus": "draft"
+      }
+    }
   }
 }

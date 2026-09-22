@@ -8,7 +8,9 @@
     "icon": "./src/assets/images/icon.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
-    "runtimeVersion": { "policy": "appVersion" },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "updates": {
       "url": "https://u.expo.dev/59774380-33f7-414a-ac86-52528266a0b9",
       "fallbackToCacheTimeout": 0
@@ -24,25 +26,146 @@
       "buildNumber": "1",
       "usesAppleSignIn": true,
       "infoPlist": {
-        "NSCameraUsageDescription": "PhantomShield captures intruder photos when unauthorized access is attempted. This is disclosed to you during setup and requires your explicit opt-in.",
-        "NSFaceIDUsageDescription": "PhantomShield uses Face ID to verify your identity every time you open the app.",
-        "NSLocationWhenInUseUsageDescription": "PhantomShield can log the location of your device during unauthorized access attempts, if you enable this feature.",
+        "NSCameraUsageDescription": "PhantomShield uses the front camera to take a photo when someone enters a wrong PIN or moves your phone while Guard Mode is on. This only happens if you turn Intruder Photos on.",
+        "NSFaceIDUsageDescription": "PhantomShield uses Face ID so only you can open the app and stop Guard Mode.",
+        "NSLocationWhenInUseUsageDescription": "PhantomShield uses your location only for features you switch on: tagging security events (like a wrong PIN) with where they happened, and finding this phone if it goes missing.",
         "UIBackgroundModes": [
-          "fetch",
-          "remote-notification"
+          "location"
         ],
-        "CFBundleURLTypes": [
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "PhantomShield records where this phone is in the background — for Find My Phone, or during Guard Mode with background tracking — so you can locate it from the web dashboard if it is lost or stolen. It only runs while you have one of these switched on."
+      },
+      "privacyManifests": {
+        "NSPrivacyCollectedDataTypes": [
           {
-            "CFBundleURLSchemes": [
-              "com.googleusercontent.apps.119391523094-10al3p2cdaid85r958vp8033en9u0g7i"
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeEmailAddress",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeName",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeUserID",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypePhotosorVideos",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypePreciseLocation",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeDeviceID",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeProductInteraction",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality",
+              "NSPrivacyCollectedDataTypePurposeAnalytics"
+            ]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypePurchaseHistory",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeCrashData",
+            "NSPrivacyCollectedDataTypeLinked": false,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypePerformanceData",
+            "NSPrivacyCollectedDataTypeLinked": false,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          },
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeOtherDiagnosticData",
+            "NSPrivacyCollectedDataTypeLinked": false,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          }
+        ],
+        "NSPrivacyTracking": false,
+        "NSPrivacyAccessedAPITypes": [
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
+            "NSPrivacyAccessedAPITypeReasons": [
+              "CA92.1"
+            ]
+          },
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp",
+            "NSPrivacyAccessedAPITypeReasons": [
+              "C617.1",
+              "0A2A.1",
+              "3B52.1"
+            ]
+          },
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategorySystemBootTime",
+            "NSPrivacyAccessedAPITypeReasons": [
+              "35F9.1"
+            ]
+          },
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryDiskSpace",
+            "NSPrivacyAccessedAPITypeReasons": [
+              "E174.1",
+              "85F4.1"
             ]
           }
         ]
+      },
+      "config": {
+        "usesNonExemptEncryption": false
       }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./src/assets/images/android-icon-foreground.png",
+        "backgroundImage": "./src/assets/images/android-icon-background.png",
+        "monochromeImage": "./src/assets/images/android-icon-monochrome.png",
         "backgroundColor": "#080C12"
       },
       "package": "dev.bonhomie95.phantomshield",
@@ -51,12 +174,31 @@
         "android.permission.CAMERA",
         "android.permission.USE_BIOMETRIC",
         "android.permission.USE_FINGERPRINT",
-        "android.permission.RECEIVE_BOOT_COMPLETED",
-        "android.permission.FOREGROUND_SERVICE",
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.VIBRATE"
+      ],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_PHONE_STATE",
+        "com.google.android.gms.permission.AD_ID",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.ACTIVITY_RECOGNITION",
         "android.permission.PACKAGE_USAGE_STATS"
-      ]
+      ],
+      "allowBackup": false
     },
     "plugins": [
       [
@@ -71,52 +213,90 @@
           "ios": {
             "useFrameworks": "static",
             "deploymentTarget": "15.1"
+          },
+          "android": {
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36,
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "extraProguardRules": "# Loaded by reflection to run background tasks (Find My Phone) after the app is killed.\n-keep class expo.modules.adapters.react.apploader.** { *; }\n-keep class expo.modules.taskManager.** { *; }\n"
           }
         }
       ],
-      "@react-native-google-signin/google-signin",
+      [
+        "@react-native-google-signin/google-signin",
+        {
+          "iosUrlScheme": "com.googleusercontent.apps.119391523094-10al3p2cdaid85r958vp8033en9u0g7i"
+        }
+      ],
       "expo-secure-store",
-      "expo-local-authentication",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "PhantomShield uses Face ID so only you can open the app and stop Guard Mode."
+        }
+      ],
       "expo-apple-authentication",
       "expo-task-manager",
-      "expo-background-task",
-      "expo-sensors",
-      "expo-audio",
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "PhantomShield uses the motion sensors to notice when your phone is picked up or moved while Guard Mode is on."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "PhantomShield logs your device's location during an unauthorized-access or anti-theft alarm event, if you enable it."
+          "locationAlwaysAndWhenInUsePermission": "PhantomShield records where this phone is in the background — for Find My Phone, or during Guard Mode with background tracking — so you can locate it from the web dashboard if it is lost or stolen. It only runs while you have one of these switched on.",
+          "locationWhenInUsePermission": "PhantomShield uses your location only for features you switch on: tagging security events (like a wrong PIN) with where they happened, and finding this phone if it goes missing.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true,
+          "locationAlwaysPermission": "PhantomShield records where this phone is in the background — for Find My Phone, or during Guard Mode with background tracking — so you can locate it from the web dashboard if it is lost or stolen. It only runs while you have one of these switched on."
         }
       ],
       [
         "expo-camera",
         {
-          "cameraPermission": "PhantomShield uses the front camera to silently capture intruder photos when an incorrect PIN is entered. This feature is opt-in and fully disclosed during setup."
+          "cameraPermission": "PhantomShield uses the front camera to take a photo when someone enters a wrong PIN or moves your phone while Guard Mode is on. This only happens if you turn Intruder Photos on.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
         }
       ],
       [
         "expo-notifications",
         {
-          "icon": "./src/assets/images/icon.png",
+          "icon": "./src/assets/images/notification-icon.png",
           "color": "#00D4FF",
           "sounds": []
         }
       ],
       "expo-asset",
+      "@sentry/react-native",
       [
-        "react-native-google-mobile-ads",
+        "./plugins/withPodsDeploymentTarget",
         {
-          "androidAppId": "ca-app-pub-3940256099942544~3347511713",
-          "iosAppId": "ca-app-pub-3940256099942544~1458002511"
+          "target": "15.1"
         }
       ],
-      "@sentry/react-native"
+      "expo-quick-actions",
+      "./plugins/withArmGuardIntent"
     ],
     "extra": {
       "eas": {
         "projectId": "59774380-33f7-414a-ac86-52528266a0b9"
       }
     },
-    "owner": "bonhomie95"
+    "owner": "bonhomie95",
+    "description": "Anti-theft for your own phone: Guard Mode alarms, intruder photos, Find My Phone, lost-mode messages and guardian alerts.",
+    "primaryColor": "#00D4FF",
+    "backgroundColor": "#080C12"
   }
 }

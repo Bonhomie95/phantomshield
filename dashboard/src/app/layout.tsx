@@ -3,9 +3,8 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: { default: 'PhantomShield', template: '%s · PhantomShield' },
-  description: 'Personal security intelligence. Monitor your device, detect threats, protect your data.',
+  description: 'Anti-theft dashboard for your own phone: intruder photos, location and remote lock.',
   metadataBase: new URL('https://app.phantomshield.app'),
-  icons: { icon: '/favicon.ico', apple: '/apple-touch-icon.png' },
   openGraph: {
     siteName: 'PhantomShield',
     type: 'website',
@@ -17,7 +16,7 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
-  themeColor: '#0A0E1A',
+  themeColor: '#080C12',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

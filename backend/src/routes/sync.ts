@@ -1,200 +1,63 @@
 import { FastifyPluginAsync } from 'fastify';
-import crypto from 'crypto';
-import { Types } from 'mongoose';
 import { z } from 'zod';
-import { authenticate, requirePlan } from '@/middleware/auth';
-import { ActivityEvent, IntruderEvent, Device } from '@/models';
-import { JWTPayload, PLAN_LIMITS, SyncBatchPayload } from '@/types';
+import { authenticate } from '@/middleware/auth';
+import { IntruderEvent, GuardSessionCount } from '@/models';
+import { JWTPayload, PLAN_LIMITS, AppError } from '@/types';
 import { wsBroadcastToUser } from '@/services/wsService';
-import { isStorageConfigured, intruderKey, presignUpload, presignDownload } from '@/services/storage';
+import { notifyIntruderDetected } from '@/services/pushService';
+import {
+  intruderKey, savePhoto, getPhoto, hasPhoto, countPhotosSince, isJpeg, isEncryptedPhoto,
+  MAX_PHOTO_BYTES, INTRUDER_CONTENT_TYPE, ENCRYPTED_PHOTO_CONTENT_TYPE, safeEventId,
+} from '@/services/storage';
+import { alertGuardians } from '@/services/guardianService';
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
-
-const EventSchema = z.object({
-  id:               z.string().max(64),
-  type:             z.string().max(64),
-  appName:          z.string().max(128).optional(),
-  timestamp:        z.number(),
-  duration:         z.number().optional(),
-  isAnomalous:      z.boolean(),
-  anomalyReason:    z.string().max(255).optional(),
-  encryptedPayload: z.string().optional(),
-});
-
-const BatchSchema = z.object({
-  deviceId: z.string().max(128),
-  events:   z.array(EventSchema).max(200), // cap at 200 per batch
-  // Optional client-computed sha256 over JSON.stringify(events). When present
-  // we verify it to catch payload corruption; when omitted we skip the check.
-  // (This is a corruption guard, not a security control — TLS covers the wire.)
-  checksum: z.string().max(128).optional(),
-});
 
 const IntruderSchema = z.object({
   id:               z.string().max(64),
   timestamp:        z.number(),
   pinLayer:         z.string().max(32),
-  failedAttempt:    z.number().int().min(1).max(20),
-  photoBase64:      z.string().optional(), // encrypted on client
-  encryptedPhotoKey: z.string().optional(),
+  // Attempts keep counting through lockouts, so a determined intruder can
+  // exceed any small cap — rejecting the event then would lose the evidence.
+  failedAttempt:    z.number().int().min(1).max(100_000),
+  photoBase64:      z.string().max(0).optional(), // legacy field — photos use the upload route
+  encryptedPhotoKey: z.string().max(256).optional(),
   location: z.object({
-    lat:      z.number(),
-    lng:      z.number(),
-    accuracy: z.number(),
+    lat:      z.number().min(-90).max(90),
+    lng:      z.number().min(-180).max(180),
+    accuracy: z.number().min(0),
   }).optional(),
 });
 
 // ─── Sync Plugin ──────────────────────────────────────────────────────────────
 
+/** First instant of the current calendar month (server time). */
+function monthStart(): Date {
+  const d = new Date();
+  d.setDate(1);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
 const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
-  // ── POST /sync/events — batch upload encrypted events ─────────────
-  fastify.post('/events', { preHandler: [authenticate] }, async (request, reply) => {
-    const user = request.user as JWTPayload;
-    const parsed = BatchSchema.safeParse(request.body);
-
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.flatten() });
-    }
-
-    const { deviceId, events, checksum } = parsed.data;
-
-    // Corruption check — verify checksum only when the client supplied one
-    if (checksum) {
-      const eventsJson = JSON.stringify(events);
-      const expected = crypto.createHash('sha256').update(eventsJson).digest('hex');
-      if (expected !== checksum) {
-        return reply.code(400).send({ error: 'Checksum mismatch. Payload may be corrupted.' });
-      }
-    }
-
-    // Get plan limits
-    const limits = PLAN_LIMITS[user.plan];
-
-    // Deduplicate: find already-stored event IDs
-    const incomingIds = events.map(e => e.id);
-    const existing = await ActivityEvent.find(
-      { eventId: { $in: incomingIds } },
-      { eventId: 1 }
-    ).lean();
-    const existingIds = new Set(existing.map(e => e.eventId));
-    const newEvents = events.filter(e => !existingIds.has(e.id));
-
-    if (newEvents.length === 0) {
-      return reply.code(200).send({ inserted: 0, skipped: events.length, message: 'All events already synced.' });
-    }
-
-    // Bulk insert
-    const docs = newEvents.map(e => ({
-      userId:           user.userId,
-      deviceId,
-      eventId:          e.id,
-      type:             e.type,
-      appName:          e.appName,
-      timestamp:        new Date(e.timestamp),
-      duration:         e.duration,
-      isAnomalous:      e.isAnomalous,
-      anomalyReason:    e.anomalyReason,
-      encryptedPayload: e.encryptedPayload,
-    }));
-
-    await ActivityEvent.insertMany(docs, { ordered: false });
-
-    // Apply retention limits: remove events older than plan's history window
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - limits.historyDays);
-    await ActivityEvent.deleteMany({ userId: user.userId, timestamp: { $lt: cutoff } });
-
-    // Real-time broadcast to dashboard (Phase 2)
-    const anomalous = newEvents.filter(e => e.isAnomalous);
-    if (anomalous.length > 0) {
-      wsBroadcastToUser(user.userId, {
-        type: 'anomaly_alert',
-        payload: { count: anomalous.length, events: anomalous.slice(0, 5) },
-        timestamp: Date.now(),
-      });
-    }
-
-    return reply.code(201).send({
-      inserted: newEvents.length,
-      skipped:  existingIds.size,
-    });
-  });
-
-  // ── GET /sync/events — fetch events for dashboard ─────────────────
-  fastify.get('/events', { preHandler: [authenticate, requirePlan('guard', 'elite')] }, async (request, reply) => {
-    const user  = request.user as JWTPayload;
-    const query = request.query as {
-      deviceId?: string;
-      from?: string;
-      to?: string;
-      limit?: string;
-      anomalousOnly?: string;
-    };
-
-    const limits  = PLAN_LIMITS[user.plan];
-    const maxDays = limits.historyDays;
-
-    const from = query.from
-      ? new Date(query.from)
-      : new Date(Date.now() - maxDays * 86_400_000);
-    const to   = query.to ? new Date(query.to) : new Date();
-    const limit = Math.min(parseInt(query.limit ?? '200'), 500);
-
-    const filter: Record<string, unknown> = {
-      userId:    user.userId,
-      timestamp: { $gte: from, $lte: to },
-    };
-    if (query.deviceId)     filter.deviceId    = query.deviceId;
-    if (query.anomalousOnly === 'true') filter.isAnomalous = true;
-
-    const events = await ActivityEvent.find(filter)
-      .sort({ timestamp: -1 })
-      .limit(limit)
-      .select('-__v -_id -userId')
-      .lean();
-
-    return reply.code(200).send({ events, count: events.length });
-  });
-
-  // ── GET /sync/stats — daily stats summary ─────────────────────────
-  fastify.get('/stats', { preHandler: [authenticate] }, async (request, reply) => {
-    const user  = request.user as JWTPayload;
-    const query = request.query as { days?: string };
-    const days  = Math.min(parseInt(query.days ?? '7'), PLAN_LIMITS[user.plan].historyDays);
-
-    const from = new Date(Date.now() - days * 86_400_000);
-
-    const stats = await ActivityEvent.aggregate([
-      {
-        $match: {
-          userId:    { $eq: new Types.ObjectId(user.userId) },
-          timestamp: { $gte: from },
-        },
-      },
-      {
-        $group: {
-          _id:             { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } },
-          totalEvents:     { $sum: 1 },
-          unlocks:         { $sum: { $cond: [{ $eq: ['$type', 'screen_unlocked'] }, 1, 0] } },
-          anomalies:       { $sum: { $cond: ['$isAnomalous', 1, 0] } },
-          totalScreenTime: { $sum: { $ifNull: ['$duration', 0] } },
-        },
-      },
-      { $sort: { _id: -1 } },
-    ]);
-
-    return reply.code(200).send({ stats, days });
-  });
+  // Raw JPEG bodies for the photo upload route. Registered on this plugin only.
+  fastify.addContentTypeParser(
+    [INTRUDER_CONTENT_TYPE, ENCRYPTED_PHOTO_CONTENT_TYPE],
+    { parseAs: 'buffer', bodyLimit: MAX_PHOTO_BYTES },
+    (_req, body, done) => done(null, body),
+  );
 
   // ── POST /sync/intruder — upload intruder event ───────────────────
-  fastify.post('/intruder', { preHandler: [authenticate] }, async (request, reply) => {
+  fastify.post('/intruder', {
+    preHandler: [authenticate],
+    // Backstop for a runaway or hostile client. Guard Mode can legitimately
+    // fire in bursts, so this is deliberately generous — it exists to bound
+    // the worst case (thousands of events an hour from one device), not to
+    // shape normal use.
+    config: { rateLimit: { max: 120, timeWindow: 3_600_000 } },
+  }, async (request, reply) => {
     const user   = request.user as JWTPayload;
-    const limits = PLAN_LIMITS[user.plan];
-
-    if (limits.intruderSnapshots === 0) {
-      return reply.code(403).send({ error: 'Intruder snapshots require Phantom Guard or Elite.' });
-    }
 
     const parsed = IntruderSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -203,40 +66,35 @@ const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     const data = parsed.data;
 
-    // Check monthly snapshot limit (Guard plan)
-    if (limits.intruderSnapshots !== -1) {
-      const monthStart = new Date();
-      monthStart.setDate(1);
-      monthStart.setHours(0, 0, 0, 0);
-      const count = await IntruderEvent.countDocuments({
-        userId: user.userId,
-        createdAt: { $gte: monthStart },
+    // The EVENT is always recorded, on every tier, without limit. Only the
+    // PHOTO is metered — and that is enforced at upload time (PUT .../photo).
+    // Here we simply link the event to a photo the device actually stored.
+    const photoStored = !!data.encryptedPhotoKey && (await hasPhoto(user.userId, data.id));
+    const derivedKey = photoStored ? intruderKey(user.userId, data.id) : undefined;
+    let event;
+    try {
+      event = await IntruderEvent.create({
+        userId:           user.userId,
+        // The token's own device binding, never a client header.
+        deviceId:         user.deviceId,
+        eventId:          data.id,
+        timestamp:        new Date(data.timestamp),
+        pinLayer:         data.pinLayer,
+        failedAttempt:    data.failedAttempt,
+        photoUrl:         derivedKey,   // server-derived reference, or undefined
+        location:         data.location,
+        encryptedPhotoKey: derivedKey,
       });
-      if (count >= limits.intruderSnapshots) {
-        return reply.code(429).send({
-          error: 'Monthly intruder snapshot limit reached.',
-          limit: limits.intruderSnapshots,
-          upgradeUrl: 'https://phantomshield.app/upgrade',
-        });
+    } catch (caught) {
+      const err = caught as AppError;
+      // A retry of the same event (same id) is a no-op, not an error.
+      if (err?.code === 11000) {
+        return reply.code(200).send({ id: data.id, message: 'Intruder event already recorded.' });
       }
+      throw err;
     }
 
-    // The photo itself is uploaded straight to R2 by the device via a presigned
-    // PUT (see POST /sync/intruder/upload-url). Here we only persist the object
-    // key the client reported, if any — never the image bytes.
-    const event = await IntruderEvent.create({
-      userId:           user.userId,
-      deviceId:         (request.headers['x-device-id'] as string) ?? 'unknown',
-      eventId:          data.id,
-      timestamp:        new Date(data.timestamp),
-      pinLayer:         data.pinLayer,
-      failedAttempt:    data.failedAttempt,
-      photoUrl:         data.encryptedPhotoKey,   // R2 object key, or undefined
-      location:         data.location,
-      encryptedPhotoKey: data.encryptedPhotoKey,
-    });
-
-    // Real-time alert to dashboard
+    // Real-time alert to any open dashboard socket…
     wsBroadcastToUser(user.userId, {
       type: 'intruder_alert',
       payload: {
@@ -244,17 +102,53 @@ const syncRoutes: FastifyPluginAsync = async (fastify) => {
         timestamp:    data.timestamp,
         pinLayer:     data.pinLayer,
         failedAttempt: data.failedAttempt,
-        hasPhoto:     !!data.photoBase64,
+        hasPhoto:     photoStored,
         location:     data.location,
       },
       timestamp: Date.now(),
     });
 
-    return reply.code(201).send({ id: event.id, message: 'Intruder event recorded.' });
+    // …and a push to the owner's OTHER devices. This is the product's core
+    // moment ("someone is trying to get into your phone"), and until now it
+    // reached nobody unless a dashboard happened to be open. The device the
+    // event came from is excluded so the handset in the intruder's hand stays
+    // silent.
+    const originDeviceId = user.deviceId;
+    // The JWT carries the account email, so the email fallback needs no extra
+    // DB read on this hot path.
+    void notifyIntruderDetected(
+      user.userId,
+      data.pinLayer,
+      data.failedAttempt,
+      originDeviceId,
+      user.email,
+    ).catch((err) => request.log.error({ err, userId: user.userId }, 'intruder push enqueue failed'));
+
+    // Guard Mode being tripped is the moment a phone is most likely being taken
+    // — tell the guardians who asked to hear about it (throttled per device).
+    if (data.pinLayer === 'guard') {
+      void alertGuardians(
+        user.userId,
+        originDeviceId,
+        'Guard Mode detected someone moving or using their phone while it was left alone.',
+        'guard',
+      ).catch((err) => request.log.error({ err, userId: user.userId }, 'guardian alert failed'));
+    }
+
+    return reply.code(201).send({
+      id: event.id,
+      message: 'Intruder event recorded.',
+      // Tell the device whether the photo was kept, so it can surface an
+      // honest "photo not stored — monthly limit reached" state instead of
+      // silently implying the image is safe in the cloud.
+      photoStored,
+    });
   });
 
   // ── GET /sync/intruder — fetch intruder events ────────────────────
-  fastify.get('/intruder', { preHandler: [authenticate, requirePlan('guard', 'elite')] }, async (request, reply) => {
+  // Readable on every tier: if the phone is gone, this is the only surface the
+  // owner has left. Paid tiers get more history and more stored photos.
+  fastify.get('/intruder', { preHandler: [authenticate] }, async (request, reply) => {
     const user = request.user as JWTPayload;
     const events = await IntruderEvent.find({ userId: user.userId })
       .sort({ timestamp: -1 })
@@ -262,30 +156,79 @@ const syncRoutes: FastifyPluginAsync = async (fastify) => {
       .select('-__v -_id -userId')
       .lean();
 
-    // Swap stored R2 object keys for short-lived presigned GET URLs the
-    // dashboard can render directly.
-    const withUrls = events.map((e) => ({
+    // The browser fetches the image through the authenticated photo route; we
+    // only say whether one exists. Never expose the stored reference.
+    const withUrls = events.map(({ photoUrl, encryptedPhotoKey: _k, ...e }) => ({
       ...e,
-      photoUrl: e.photoUrl && isStorageConfigured() ? presignDownload(e.photoUrl) : undefined,
+      hasPhoto: !!photoUrl,
     }));
 
     return reply.code(200).send({ events: withUrls, count: withUrls.length });
   });
 
-  // ── POST /sync/intruder/upload-url — presigned PUT for the photo ──
-  // The device uploads the JPEG straight to R2 over TLS; we never touch bytes.
-  fastify.post('/intruder/upload-url', {
-    preHandler: [authenticate, requirePlan('guard', 'elite')],
+  // ── POST /sync/guard-session — report a completed Guard Mode session ──
+  // Guard Mode runs entirely on-device, so the server can only know a session
+  // happened if the client reports it. This is the activation signal used by
+  // basis for a real activation metric.
+  fastify.post('/guard-session', { preHandler: [authenticate] }, async (request, reply) => {
+    const user = request.user as JWTPayload;
+    const now = new Date();
+
+    await GuardSessionCount.updateOne(
+      { userId: user.userId },
+      { $inc: { sessions: 1 }, $set: { lastAt: now }, $setOnInsert: { firstAt: now } },
+      { upsert: true },
+    );
+
+    return reply.code(200).send({ ok: true });
+  });
+
+  // ── PUT /sync/intruder/:id/photo — upload the JPEG for an event ────
+  // Body is the raw image (Content-Type: image/jpeg). The monthly quota is
+  // enforced here, and the response says so, so the device can tell the owner
+  // honestly that a photo stayed on the phone only.
+  fastify.put('/intruder/:id/photo', {
+    preHandler: [authenticate],
+    config: { rateLimit: { max: 120, timeWindow: 3_600_000 } },
   }, async (request, reply) => {
     const user = request.user as JWTPayload;
-    if (!isStorageConfigured()) {
-      return reply.code(501).send({ error: 'Photo storage is not configured.' });
-    }
-    const parsed = z.object({ id: z.string().min(1).max(64) }).safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+    const { id } = request.params as { id: string };
+    const eventId = safeEventId(id);
+    if (!eventId) return reply.code(400).send({ error: 'Invalid event id.' });
 
-    const key = intruderKey(user.userId, parsed.data.id);
-    return reply.code(200).send({ key, uploadUrl: presignUpload(key), expiresIn: 300 });
+    const body = request.body;
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      return reply.code(415).send({ error: 'Send the photo as image/jpeg.' });
+    }
+    // Either a plain JPEG, or an end-to-end encrypted one the server can't read.
+    const encrypted = request.headers['content-type']?.startsWith(ENCRYPTED_PHOTO_CONTENT_TYPE) ?? false;
+    if (encrypted ? !isEncryptedPhoto(body) : !isJpeg(body)) {
+      return reply.code(415).send({ error: 'Only JPEG photos are accepted.' });
+    }
+
+    const limits = PLAN_LIMITS[user.plan];
+    if (limits.intruderSnapshots !== -1 && !(await hasPhoto(user.userId, eventId))) {
+      const used = await countPhotosSince(user.userId, monthStart());
+      if (used >= limits.intruderSnapshots) {
+        return reply.code(200).send({ stored: false, photoQuotaReached: true });
+      }
+    }
+
+    await savePhoto(user.userId, eventId, body, encrypted ? ENCRYPTED_PHOTO_CONTENT_TYPE : INTRUDER_CONTENT_TYPE);
+    return reply.code(201).send({ stored: true, key: intruderKey(user.userId, eventId) });
+  });
+
+  // ── GET /sync/intruder/:id/photo — the owner views a stored photo ──
+  fastify.get('/intruder/:id/photo', { preHandler: [authenticate] }, async (request, reply) => {
+    const user = request.user as JWTPayload;
+    const { id } = request.params as { id: string };
+    const photo = await getPhoto(user.userId, id);
+    if (!photo) return reply.code(404).send({ error: 'Photo not found.' });
+    return reply
+      .header('Content-Type', photo.contentType)
+      .header('Cache-Control', 'private, max-age=300')
+      .header('X-Content-Type-Options', 'nosniff')
+      .send(photo.data);
   });
 };
 

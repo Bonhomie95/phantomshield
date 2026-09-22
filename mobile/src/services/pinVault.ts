@@ -2,17 +2,21 @@
  * PIN vault — stores PINs as salted SHA-256 hashes in the OS keychain
  * (expo-secure-store), never in plaintext and never in AsyncStorage.
  *
- * Each layer's PIN gets its own random 16-byte salt so identical PINs across
- * layers produce different hashes, and a stolen AsyncStorage backup reveals
- * nothing. Verification is a constant-time hex compare.
+ * There is one app PIN and an optional decoy PIN. Each gets its own random
+ * 16-byte salt, and verification is a constant-time hex compare.
+ *
+ * Older builds had a PIN per section (dashboard / logs / vault / settings).
+ * Any of those still opens the app; the first one that matches becomes the
+ * app PIN and the rest are deleted, so upgrading never locks anyone out.
  */
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { PINLayer } from '@/constants/types';
 
-const ALL_LAYERS: PINLayer[] = ['dashboard', 'logs', 'vault', 'settings', 'decoy'];
+const LEGACY_LAYERS = ['settings', 'dashboard', 'vault', 'logs'] as const;
+type StoredLayer = PINLayer | (typeof LEGACY_LAYERS)[number];
 
-const keyFor = (layer: PINLayer) => `ps_pin_${layer}`;
+const keyFor = (layer: StoredLayer) => `ps_pin_${layer}`;
 
 interface StoredPin {
   salt: string;
@@ -40,9 +44,12 @@ export async function setPin(layer: PINLayer, pin: string): Promise<void> {
   const hash = await hashPin(salt, pin);
   const payload: StoredPin = { salt, hash };
   await SecureStore.setItemAsync(keyFor(layer), JSON.stringify(payload));
+  if (layer === 'app') await dropLegacy();
 }
 
-export async function verifyPin(layer: PINLayer, pin: string): Promise<boolean> {
+const dropLegacy = () => Promise.all(LEGACY_LAYERS.map((l) => SecureStore.deleteItemAsync(keyFor(l)))).then(() => {});
+
+async function matches(layer: StoredLayer, pin: string): Promise<boolean> {
   const raw = await SecureStore.getItemAsync(keyFor(layer));
   if (!raw) return false;
   try {
@@ -54,29 +61,71 @@ export async function verifyPin(layer: PINLayer, pin: string): Promise<boolean> 
   }
 }
 
+export async function verifyPin(layer: PINLayer, pin: string): Promise<boolean> {
+  if (await matches(layer, pin)) return true;
+  if (layer !== 'app' || (await SecureStore.getItemAsync(keyFor('app'))) !== null) return false;
+  // Upgrade path: a PIN from the old per-section model opens the app once and
+  // becomes the app PIN.
+  for (const l of LEGACY_LAYERS) {
+    if (await matches(l, pin)) {
+      await setPin('app', pin);
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function hasPin(layer: PINLayer): Promise<boolean> {
-  return (await SecureStore.getItemAsync(keyFor(layer))) !== null;
+  if ((await SecureStore.getItemAsync(keyFor(layer))) !== null) return true;
+  if (layer !== 'app') return false;
+  for (const l of LEGACY_LAYERS) if ((await SecureStore.getItemAsync(keyFor(l))) !== null) return true;
+  return false;
 }
 
-/** True if a PIN is configured on any layer. */
-export async function hasAnyPin(): Promise<boolean> {
-  const results = await Promise.all(ALL_LAYERS.map((l) => hasPin(l)));
-  return results.some(Boolean);
+// ─── First-run setup permission ───────────────────────────────────────────────
+// The PIN setup screen can overwrite PINs, so it must not be openable by a deep
+// link. Onboarding grants a one-shot, in-memory allowance (a URL can't set it);
+// after that, it requires the unlocked app.
+let firstRunSetupAllowed = false;
+export const allowFirstRunSetup = () => { firstRunSetupAllowed = true; };
+export const consumeFirstRunSetup = (): boolean => {
+  const ok = firstRunSetupAllowed;
+  firstRunSetupAllowed = false;
+  return ok;
+};
+
+/** Trivially guessable PINs: one repeated digit, or a straight run (1234 / 9876). */
+export function isWeakPin(pin: string): boolean {
+  if (/^(\d)\1+$/.test(pin)) return true;
+  const d = pin.split('').map(Number);
+  const steps = d.slice(1).map((v, i) => v - d[i]);
+  return steps.every((x) => x === 1) || steps.every((x) => x === -1);
 }
 
-export async function clearPin(layer: PINLayer): Promise<void> {
+export async function removePin(layer: PINLayer): Promise<void> {
   await SecureStore.deleteItemAsync(keyFor(layer));
 }
 
 export async function clearAllPins(): Promise<void> {
-  await Promise.all(ALL_LAYERS.map((l) => SecureStore.deleteItemAsync(keyFor(l))));
+  await Promise.all([
+    ...(['app', 'decoy', ...LEGACY_LAYERS] as StoredLayer[]).map((l) => SecureStore.deleteItemAsync(keyFor(l))),
+    // Lockout counters too, so the next owner of this install starts clean.
+    ...['', '_guard', '_lost'].map((c) => SecureStore.deleteItemAsync(`ps_pin_lock${c}`)),
+  ]);
 }
 
 // ─── Brute-force lockout (persisted) ──────────────────────────────────────────
 // The lockout lives in the keychain, not component state, so force-quitting and
 // relaunching the app can't reset the attempt counter and bypass the wait.
 
-const LOCK_KEY = 'ps_pin_lock';
+// Lockout is namespaced by CONTEXT so distinct gates don't share one counter:
+// failing the Guard-stop pad must not lock the owner out of the app gate, and a
+// coercer hammering one gate can't lock every gate. The default context keeps
+// the original single-counter behaviour for the app gate.
+const LOCK_KEY_BASE = 'ps_pin_lock';
+export type LockContext = string;
+const lockKey = (context?: LockContext) =>
+  context ? `${LOCK_KEY_BASE}_${context}` : LOCK_KEY_BASE;
 
 export interface LockState {
   attempts: number;
@@ -92,8 +141,8 @@ function lockoutMsFor(attempts: number): number {
   return 0;
 }
 
-export async function getLockState(): Promise<LockState> {
-  const raw = await SecureStore.getItemAsync(LOCK_KEY);
+export async function getLockState(context?: LockContext): Promise<LockState> {
+  const raw = await SecureStore.getItemAsync(lockKey(context));
   if (!raw) return { attempts: 0, lockedUntil: 0 };
   try {
     const parsed = JSON.parse(raw) as LockState;
@@ -103,15 +152,15 @@ export async function getLockState(): Promise<LockState> {
   }
 }
 
-export async function registerFailedAttempt(): Promise<LockState> {
-  const cur = await getLockState();
+export async function registerFailedAttempt(context?: LockContext): Promise<LockState> {
+  const cur = await getLockState(context);
   const attempts = cur.attempts + 1;
   const ms = lockoutMsFor(attempts);
   const next: LockState = { attempts, lockedUntil: ms > 0 ? Date.now() + ms : cur.lockedUntil };
-  await SecureStore.setItemAsync(LOCK_KEY, JSON.stringify(next));
+  await SecureStore.setItemAsync(lockKey(context), JSON.stringify(next));
   return next;
 }
 
-export async function resetAttempts(): Promise<void> {
-  await SecureStore.deleteItemAsync(LOCK_KEY);
+export async function resetAttempts(context?: LockContext): Promise<void> {
+  await SecureStore.deleteItemAsync(lockKey(context));
 }

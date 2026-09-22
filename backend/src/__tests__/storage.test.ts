@@ -1,61 +1,37 @@
 /**
- * Tests for the dependency-free R2 (SigV4) presigner.
+ * Tests for the pure helpers around MongoDB-backed intruder photo storage.
  */
-import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
+import { describe, it, expect } from '@jest/globals';
+import { intruderKey, safeEventId, isJpeg, isEncryptedPhoto, MAX_PHOTO_BYTES } from '../services/storage';
 
-describe('storage presigner', () => {
-  const ORIGINAL_ENV = process.env;
-
-  beforeEach(() => {
-    jest.resetModules();
-    process.env = {
-      ...ORIGINAL_ENV,
-      R2_ACCOUNT_ID: 'acct123',
-      R2_ACCESS_KEY_ID: 'AKIAEXAMPLE',
-      R2_SECRET_ACCESS_KEY: 'secretExampleKey',
-      R2_BUCKET_NAME: 'ps-media',
-    };
+describe('photo storage helpers', () => {
+  it('sanitizes the event id into a safe key', () => {
+    expect(intruderKey('user1', 'evt/../ b!')).toBe('intruder/user1/evtb.jpg');
   });
 
-  afterEach(() => {
-    process.env = ORIGINAL_ENV;
+  it('caps event ids at 64 characters', () => {
+    expect(safeEventId('a'.repeat(200))).toHaveLength(64);
   });
 
-  it('reports configured only when all R2 vars are present', () => {
-    const s = require('../services/storage');
-    expect(s.isStorageConfigured()).toBe(true);
-
-    jest.resetModules();
-    process.env = { ...ORIGINAL_ENV, R2_ACCOUNT_ID: '', R2_ACCESS_KEY_ID: '', R2_SECRET_ACCESS_KEY: '', R2_BUCKET_NAME: '' };
-    const s2 = require('../services/storage');
-    expect(s2.isStorageConfigured()).toBe(false);
+  it('keeps legal id characters', () => {
+    expect(safeEventId('guard_1700000000000_ab-C')).toBe('guard_1700000000000_ab-C');
   });
 
-  it('sanitizes the event id into a safe object key', () => {
-    const s = require('../services/storage');
-    // All non-alphanumeric chars (slashes, dots, spaces, punctuation) are stripped.
-    expect(s.intruderKey('user1', 'evt/../ b!')).toBe('intruder/user1/evtb.jpg');
+  it('recognises JPEG bytes and rejects everything else', () => {
+    expect(isJpeg(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00]))).toBe(true);
+    expect(isJpeg(Buffer.from('<svg onload=alert(1)>'))).toBe(false);
+    expect(isJpeg(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBe(false); // PNG
+    expect(isJpeg(Buffer.alloc(0))).toBe(false);
   });
 
-  it('builds a presigned upload URL with all required SigV4 params', () => {
-    const s = require('../services/storage');
-    const key = s.intruderKey('user1', 'evt_1');
-    const url = s.presignUpload(key);
-
-    expect(url.startsWith('https://acct123.r2.cloudflarestorage.com/ps-media/intruder/user1/evt_1.jpg')).toBe(true);
-    expect(url).toContain('X-Amz-Algorithm=AWS4-HMAC-SHA256');
-    expect(url).toContain('X-Amz-Credential=AKIAEXAMPLE');
-    expect(url).toContain('X-Amz-Expires=300');
-    expect(url).toContain('X-Amz-SignedHeaders=host');
-    expect(url).toMatch(/X-Amz-Signature=[0-9a-f]{64}/);
+  it('recognises end-to-end encrypted photos by shape only', () => {
+    const enc = Buffer.concat([Buffer.from('PSE1'), Buffer.alloc(12 + 16 + 10, 7)]);
+    expect(isEncryptedPhoto(enc)).toBe(true);
+    expect(isEncryptedPhoto(Buffer.from('PSE1'))).toBe(false); // no nonce/tag
+    expect(isEncryptedPhoto(Buffer.from([0xff, 0xd8, 0xff, 0xe0, ...Array(40).fill(0)]))).toBe(false);
   });
 
-  it('produces distinct signatures for GET vs PUT on the same key', () => {
-    const s = require('../services/storage');
-    const key = s.intruderKey('user1', 'evt_1');
-    const put = s.presignUpload(key);
-    const get = s.presignDownload(key);
-    const sigOf = (u: string) => u.match(/X-Amz-Signature=([0-9a-f]+)/)?.[1];
-    expect(sigOf(put)).not.toEqual(sigOf(get));
+  it('bounds uploads well under the 16MB document limit', () => {
+    expect(MAX_PHOTO_BYTES).toBeLessThan(16 * 1024 * 1024);
   });
 });

@@ -2,7 +2,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { api, Device } from '@/lib/api';
-import { Card, Button, Badge, SectionHeader, EmptyState, Spinner, AlertBanner, StatusDot } from '@/components/ui';
+import { Card, Button, Badge, EmptyState, Spinner, AlertBanner, StatusDot, INPUT_CLS } from '@/components/ui';
+
+const DEFAULT_LOST_MESSAGE = 'This phone is lost. Please call me so I can get it back.';
 
 export default function DevicesPage() {
   const [devices, setDevices]   = useState<Device[]>([]);
@@ -15,6 +17,7 @@ export default function DevicesPage() {
 
   const load = useCallback(() => {
     setLoading(true);
+    setError(null);
     api.devices.list()
       .then(r => setDevices(r.devices))
       .catch(e => setError(e.message))
@@ -23,14 +26,16 @@ export default function DevicesPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const doAction = async (deviceId: string, action: () => Promise<unknown>, label: string) => {
-    setActing(deviceId + label);
+  // `key` drives the per-button spinner and must match what the buttons compare
+  // against; `label` is the human-readable toast text.
+  const doAction = async <T,>(deviceId: string, action: () => Promise<T>, key: string, label: string | ((r: T) => string)) => {
+    setActing(deviceId + key);
     try {
-      await action();
-      showToast(`${label} sent successfully.`);
+      const r = await action();
+      showToast(typeof label === 'function' ? label(r) : `${label} sent successfully.`);
       load();
-    } catch (e: any) {
-      showToast(`Failed: ${e.message}`);
+    } catch (e: unknown) {
+      showToast(`Failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
     } finally {
       setActing(null);
     }
@@ -90,7 +95,7 @@ export default function DevicesPage() {
                     <Button
                       variant="secondary"
                       loading={acting === device.deviceId + 'unlock'}
-                      onClick={() => doAction(device.deviceId, () => api.devices.unlock(device.deviceId), 'Unlock')}
+                      onClick={() => doAction(device.deviceId, () => api.devices.unlock(device.deviceId), 'unlock', 'Unlock')}
                     >
                       🔓 Unlock
                     </Button>
@@ -98,7 +103,7 @@ export default function DevicesPage() {
                     <Button
                       variant="secondary"
                       loading={acting === device.deviceId + 'lock'}
-                      onClick={() => doAction(device.deviceId, () => api.devices.lock(device.deviceId), 'Lock')}
+                      onClick={() => doAction(device.deviceId, () => api.devices.lock(device.deviceId), 'lock', 'Lock')}
                     >
                       🔒 Lock App
                     </Button>
@@ -107,21 +112,21 @@ export default function DevicesPage() {
                   <Button
                     variant="secondary"
                     loading={acting === device.deviceId + 'alert'}
-                    onClick={() => doAction(device.deviceId, () => api.devices.alert(device.deviceId), 'Alert')}
+                    onClick={() => doAction(device.deviceId, () => api.devices.alert(device.deviceId), 'alert', 'Alert')}
                   >
                     🔔 Alert
                   </Button>
 
+                  {/* Free on every plan — not gated like the remote commands above. */}
                   <Button
                     variant="danger"
-                    loading={acting === device.deviceId + 'wipe'}
-                    onClick={() => {
-                      if (confirm('Wipe all activity logs for this device? This cannot be undone.')) {
-                        doAction(device.deviceId, () => api.devices.wipeLogs(device.deviceId), 'wipe');
-                      }
-                    }}
+                    loading={acting === device.deviceId + 'guardians'}
+                    onClick={() => doAction(device.deviceId, () => api.guardians.alert(device.deviceId), 'guardians', (r) =>
+                      r.sent > 0
+                        ? `Sent to ${r.sent} guardian(s).`
+                        : 'No guardians were alerted (none set up, or already alerted in the last few minutes).')}
                   >
-                    🗑 Wipe Logs
+                    📣 Alert my guardians
                   </Button>
 
                   <Button
@@ -129,7 +134,7 @@ export default function DevicesPage() {
                     loading={acting === device.deviceId + 'remove'}
                     onClick={() => {
                       if (confirm(`Remove device "${device.model}"? It will be logged out immediately.`)) {
-                        doAction(device.deviceId, () => api.devices.remove(device.deviceId), 'remove');
+                        doAction(device.deviceId, () => api.devices.remove(device.deviceId), 'remove', 'Remove');
                       }
                     }}
                   >
@@ -137,6 +142,15 @@ export default function DevicesPage() {
                   </Button>
                 </div>
               </div>
+
+              <LostMode
+                device={device}
+                busy={acting === device.deviceId + 'lost'}
+                onOn={(message, contact) =>
+                  doAction(device.deviceId, () => api.devices.lostModeOn(device.deviceId, message, contact), 'lost', (r) =>
+                    r.pushed ? 'Lost mode is on — the message was sent to the phone.' : 'Lost mode is on — it shows the next time the phone connects.')}
+                onOff={() => doAction(device.deviceId, () => api.devices.lostModeOff(device.deviceId), 'lost', () => 'Lost mode turned off.')}
+              />
             </Card>
           ))}
         </div>
@@ -147,9 +161,66 @@ export default function DevicesPage() {
         <p className="text-xs text-phantom-muted leading-relaxed">
           <span className="text-phantom-accent font-semibold">Remote commands</span> are queued and delivered the next time the device connects.
           Lock commands are also stored in the app on-device.
-          Wipe Logs permanently deletes server-side activity history for that device and queues a local wipe on next sync.
+          Lost mode and guardian alerts are free on every plan.
         </p>
       </Card>
     </div>
+  );
+}
+
+/** Per-device lost mode: a message (and a way to reach you) for whoever finds the phone. */
+function LostMode({ device, busy, onOn, onOff }: {
+  device: Device; busy: boolean;
+  onOn: (message: string, contact: string) => void; onOff: () => void;
+}) {
+  const [message, setMessage] = useState(DEFAULT_LOST_MESSAGE);
+  const [contact, setContact] = useState('');
+  const lost = device.lostMode;
+
+  if (lost?.enabled) {
+    return (
+      <div className="mt-4 pt-4 border-t border-phantom-border/50 space-y-2">
+        <div className="flex items-center gap-2">
+          <Badge variant="danger">Lost mode on</Badge>
+          {lost.since && (
+            <span className="text-xs text-phantom-faint">since {formatDistanceToNow(new Date(lost.since), { addSuffix: true })}</span>
+          )}
+        </div>
+        <p className="text-sm text-phantom-text">&ldquo;{lost.message}&rdquo;</p>
+        {lost.contact && <p className="text-xs text-phantom-muted">Contact shown: {lost.contact}</p>}
+        <Button variant="secondary" loading={busy} onClick={onOff}>Turn off lost mode</Button>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      className="mt-4 pt-4 border-t border-phantom-border/50 space-y-2"
+      onSubmit={(e) => { e.preventDefault(); onOn(message.trim(), contact.trim()); }}
+    >
+      <p className="text-xs uppercase tracking-widest text-phantom-faint font-semibold">Lost mode</p>
+      <label className="block">
+        <span className="sr-only">Message shown on the phone</span>
+        <textarea
+          className={INPUT_CLS}
+          rows={2}
+          maxLength={200}
+          required
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+        />
+      </label>
+      <label className="block">
+        <span className="sr-only">Contact for the finder</span>
+        <input
+          className={INPUT_CLS}
+          maxLength={60}
+          placeholder="Phone number or email for the finder (optional)"
+          value={contact}
+          onChange={(e) => setContact(e.target.value)}
+        />
+      </label>
+      <Button type="submit" variant="danger" loading={busy} disabled={!message.trim()}>Turn on lost mode</Button>
+    </form>
   );
 }

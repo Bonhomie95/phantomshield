@@ -6,14 +6,19 @@
  * detects. The caller (guard-mode screen) decides what to capture (face snap,
  * location) and stores it; nothing is shown on screen while armed.
  *
- * What each level watches is intentionally different:
- *   • low    — tamper only (wrong PIN / stop attempts, handled by the screen)
- *   • medium — low + phone movement + charger plugged/unplugged
- *   • high   — medium + app switches, plus a hair-trigger on movement
+ * Three modes, for the three places a phone gets taken from:
+ *   • table   — left on a table or desk. What each level watches differs:
+ *       low    — tamper only (wrong PIN / stop attempts, handled by the screen)
+ *       medium — low + phone movement + charger plugged/unplugged
+ *       high   — medium + app switches, plus a hair-trigger on movement
+ *   • charger — charging in public. Only an unplug counts.
+ *   • pocket  — in a pocket or bag (Android). The light sensor notices it being
+ *               pulled out into the light. Motion is ignored: walking moves it.
  */
-import { Accelerometer } from 'expo-sensors';
+import { Platform } from 'react-native';
+import { Accelerometer, LightSensor } from 'expo-sensors';
 import * as Battery from 'expo-battery';
-import { GuardLevel, GuardEventType } from '@/constants/types';
+import { GuardLevel, GuardEventType, GuardMode } from '@/constants/types';
 
 export interface GuardHandle {
   stop: () => void;
@@ -41,17 +46,44 @@ export const GUARD_LEVEL_SUMMARY: Record<GuardLevel, string> = {
   high:   'Records everything: movement, charger, app switches, and tampering.',
 };
 
-export interface GuardOptions {
-  level: GuardLevel;
-  onEvent: (type: GuardEventType) => void;
+export const GUARD_MODE_SUMMARY: Record<GuardMode, { title: string; desc: string }> = {
+  table:   { title: 'On a table', desc: 'Notices the phone being picked up or moved.' },
+  charger: { title: 'Charging', desc: 'Notices the charger being pulled out.' },
+  pocket:  { title: 'In a pocket or bag', desc: 'Notices the phone being taken out into the light.' },
+};
+
+/** Pocket mode needs the ambient light sensor, which only Android exposes. */
+export async function isPocketModeAvailable(): Promise<boolean> {
+  if (Platform.OS !== 'android') return false;
+  return LightSensor.isAvailableAsync().catch(() => false);
 }
 
-export function startGuard({ level, onEvent }: GuardOptions): GuardHandle {
-  const cfg = GUARD_LEVELS[level];
+// Lux thresholds with a gap between them, so light hovering near one value
+// can't flip the state back and forth. A pocket reads ~0–5 lx; indoors 100+.
+const DARK_LUX = 8;
+const LIGHT_LUX = 40;
+const DARK_SETTLE_MS = 2_000;
+
+export interface GuardOptions {
+  level: GuardLevel;
+  mode?: GuardMode;
+  onEvent: (type: GuardEventType) => void;
+  /** Pocket mode: called once the phone has been dark long enough to count as pocketed. */
+  onPocketed?: () => void;
+}
+
+export function startGuard({ level, mode = 'table', onEvent, onPocketed }: GuardOptions): GuardHandle {
+  const cfg: LevelConfig =
+    mode === 'table' ? GUARD_LEVELS[level]
+    : { watchMotion: false, motionThreshold: 1, watchCharger: mode === 'charger', watchAppSwitch: false };
 
   // Throttle each event type so a single continuous motion (or a bouncing
   // charger contact) doesn't record hundreds of entries.
-  const COOLDOWN_MS = 4000;
+  // Per-event-type throttle. `high` uses a hair-trigger motion threshold
+  // (0.14g), so at a 4s cooldown one armed phone could emit ~15 motion events a
+  // minute — each one a photo, an R2 object, a database row, a WebSocket
+  // broadcast and a push job. An 8-hour session could produce thousands.
+  const COOLDOWN_MS = level === 'high' ? 15_000 : 8_000;
   const lastFired: Partial<Record<GuardEventType, number>> = {};
   const emit = (t: GuardEventType) => {
     const now = Date.now();
@@ -88,8 +120,35 @@ export function startGuard({ level, onEvent }: GuardOptions): GuardHandle {
       const prev = prevState;
       prevState = batteryState;
       if (prev === null || prev === batteryState) return; // first reading / no change
-      if (!isCharging(prev) && isCharging(batteryState)) emit('charger_connected');
+      if (!isCharging(prev) && isCharging(batteryState)) {
+        if (mode !== 'charger') emit('charger_connected');
+      }
       else if (isCharging(prev) && !isCharging(batteryState)) emit('charger_disconnected');
+    });
+  }
+
+  // Pocket: wait until it has been dark for a moment (it's in the pocket), then
+  // the first strong light means someone took it out.
+  let lightSub: { remove: () => void } | null = null;
+  if (mode === 'pocket') {
+    let darkSince: number | null = null;
+    let pocketed = false;
+    LightSensor.setUpdateInterval(300);
+    lightSub = LightSensor.addListener(({ illuminance }) => {
+      const now = Date.now();
+      if (!pocketed) {
+        if (illuminance <= DARK_LUX) {
+          darkSince ??= now;
+          if (now - darkSince >= DARK_SETTLE_MS) {
+            pocketed = true;
+            onPocketed?.();
+          }
+        } else {
+          darkSince = null;
+        }
+        return;
+      }
+      if (illuminance >= LIGHT_LUX) emit('pocket');
     });
   }
 
@@ -98,6 +157,7 @@ export function startGuard({ level, onEvent }: GuardOptions): GuardHandle {
     stop() {
       accSub?.remove();
       batterySub?.remove();
+      lightSub?.remove();
     },
   };
 }

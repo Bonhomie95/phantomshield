@@ -17,9 +17,4 @@ config.watchFolders = [path.resolve(workspaceRoot, 'packages/shared')];
 // React versions.
 config.resolver.nodeModulesPaths = [path.resolve(projectRoot, 'node_modules')];
 
-// Only src/app is the router root (set in app.json). Keep non-route source out.
-config.resolver.blockList = [
-  /src[\/\\]scripts[\/\\].*/,
-];
-
 module.exports = config;

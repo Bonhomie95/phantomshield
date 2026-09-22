@@ -6,7 +6,7 @@ import * as Sharing from 'expo-sharing';
 import { track } from '@/services/analytics';
 
 const DEFAULT_CAPTION =
-  'Caught with PhantomShield 🛡 — it alarms + snaps a photo when someone touches my phone.';
+  'Caught with PhantomShield 🛡 — it snaps a photo when someone touches my phone.';
 
 export async function shareCatch(imageUri: string, caption: string = DEFAULT_CAPTION): Promise<void> {
   try {
