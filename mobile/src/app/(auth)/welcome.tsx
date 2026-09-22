@@ -12,15 +12,12 @@ import {
 } from "react-native";
 import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import {
-  GoogleSignin,
-  GoogleSigninButton,
-  statusCodes,
-} from "@react-native-google-signin/google-signin";
+import { GoogleSignin, statusCodes } from "@react-native-google-signin/google-signin";
 import * as AppleAuthentication from "expo-apple-authentication";
 import * as WebBrowser from "expo-web-browser";
 import Constants from "expo-constants";
 import { ShieldLogo } from "@/components/ShieldLogo";
+import { GoogleGlyph } from "@/components/GoogleGlyph";
 import { Colors, Spacing, FontSize, Radius } from "@/constants/theme";
 import { GOOGLE, LEGAL } from "@/constants/config";
 import { oauthSignIn, storeTokens, getOrCreateDeviceId } from "@/services/api";
@@ -247,13 +244,20 @@ export default function WelcomeScreen() {
           </View>
         )}
 
-        <GoogleSigninButton
-          size={GoogleSigninButton.Size.Wide}
-          color={GoogleSigninButton.Color.Dark}
+        {/* Google's current dark-theme button: their glyph, their wording and
+            colours, sized to match the Apple button above it. The library's
+            own GoogleSigninButton still draws the retired blue one. */}
+        <TouchableOpacity
+          style={[styles.googleBtn, disabled && styles.oauthBtnDisabled]}
           onPress={handleGoogleSignIn}
           disabled={disabled}
-          style={[styles.googleBtn, disabled && styles.oauthBtnDisabled]}
-        />
+          activeOpacity={0.85}
+          accessibilityRole="button"
+          accessibilityLabel="Continue with Google"
+        >
+          <GoogleGlyph size={20} />
+          <Text style={styles.googleText}>Continue with Google</Text>
+        </TouchableOpacity>
 
         {loading && (
           <View style={styles.loadingRow} accessibilityLiveRegion="polite">
@@ -361,9 +365,11 @@ const styles = StyleSheet.create({
     marginTop: Spacing.md,
   },
   tagline: {
-    fontSize: FontSize.sm,
+    fontSize: FontSize.md,
     color: Colors.textSecondary,
-    letterSpacing: 0.4,
+    letterSpacing: 0.2,
+    textAlign: "center",
+    lineHeight: 22,
   },
 
   features: { gap: 10, marginBottom: Spacing.lg },
@@ -411,23 +417,43 @@ const styles = StyleSheet.create({
   authSection: { gap: 12, marginBottom: Spacing.lg },
 
   oauthBtnDisabled: { opacity: 0.5 },
-  appleBtn: { width: "100%", height: 52 },
-  googleBtn: { width: "100%", height: 52 },
+  appleBtn: { width: "100%", height: 54 },
+  // Google's dark button: #131314 surface, #8E918F outline, #E3E3E3 label.
+  googleBtn: {
+    width: "100%",
+    height: 54,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12,
+    backgroundColor: "#131314",
+    borderWidth: 1,
+    borderColor: "#8E918F",
+    borderRadius: Radius.md,
+  },
+  googleText: {
+    fontSize: 17,
+    fontWeight: "600",
+    color: "#E3E3E3",
+    letterSpacing: 0.2,
+  },
   loadingRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
   loadingText: { fontSize: FontSize.sm, color: Colors.textSecondary },
 
+  // Third in the hierarchy, under two solid buttons: quiet, not competing.
   tryBtn: {
     borderWidth: 1,
-    borderColor: Colors.primary + "55",
-    backgroundColor: Colors.primaryGlow,
+    borderColor: Colors.bgBorder,
     borderRadius: Radius.md,
-    paddingVertical: 14,
+    height: 54,
     alignItems: "center",
+    justifyContent: "center",
+    marginTop: 4,
   },
   tryText: {
-    fontSize: FontSize.sm,
-    fontWeight: "700",
-    color: Colors.primary,
+    fontSize: FontSize.md,
+    fontWeight: "600",
+    color: Colors.textPrimary,
   },
   linkBtn: { alignItems: "center", paddingVertical: 6 },
   linkText: { fontSize: FontSize.sm, color: Colors.textSecondary },
